@@ -10,6 +10,7 @@ pub struct Config {
     pub db_url: String,
     pub apx_api_key: String,
     pub room_id: String,
+    pub ap_server: String,
 }
 
 impl Config {
@@ -23,6 +24,7 @@ impl Config {
             db_url: std::env::var("DATABASE_URL").context("DATABASE_URL")?,
             apx_api_key: std::env::var("APX_API_KEY").context("APX_API_KEY")?,
             room_id: std::env::var("LOBBY_ROOM_ID").context("LOBBY_ROOM_ID")?,
+            ap_server: std::env::var("AP_SERVER").context("AP_SERVER")?,
         })
     }
 }

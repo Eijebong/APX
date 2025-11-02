@@ -34,6 +34,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    let upstream_url = format!("ws://{}", config.ap_server);
+
     let app_state = AppState {
         config,
         passwords: passwords.clone(),
@@ -50,7 +52,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let upstream_url = "ws://127.0.0.1:38281";
     let listener = TcpListener::bind("127.0.0.1:8090").await?;
 
     log::info!("WebSocket proxy listening on 127.0.0.1:8090");
@@ -62,10 +63,11 @@ async fn main() -> Result<()> {
         let signal_sender = signal_sender.clone();
         let passwords = passwords.clone();
         let (socket, addr) = listener.accept().await?;
+        let upstream_url = upstream_url.clone();
 
         tokio::spawn(async move {
             log::debug!("New connection from {}", addr);
-            if let Err(e) = handle_client(socket, upstream_url, signal_sender, passwords).await {
+            if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords).await {
                 log::error!("Error handling client {}: {:?}", addr, e);
             }
         });
