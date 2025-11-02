@@ -231,7 +231,19 @@ fn handle_upstream_message(
             modified = true;
         }
         ConnectionState::WaitingForConnect => {
-            bail!("Upstream should not send any message while waiting for the `Connect` package")
+            for cmd in messages.iter() {
+                let cmd_type = get_cmd(cmd);
+                if cmd_type == Some("DataPackage") {
+                    log::debug!(
+                        "Allowing DataPackage response through while waiting for Connected"
+                    );
+                    continue;
+                } else {
+                    bail!(
+                        "Upstream should not send any message other than DataPackage while waiting for the `Connect` package"
+                    )
+                }
+            }
         }
         ConnectionState::WaitingForConnected { password } => {
             // We're waiting for Connected or ConnectionRefused from upstream
