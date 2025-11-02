@@ -87,7 +87,6 @@ where
 
             // Don't send if all messages were filtered out
             if commands.is_empty() {
-                log::debug!("All messages filtered out, not forwarding to upstream");
                 continue;
             }
 
@@ -151,7 +150,6 @@ where
                 UpstreamResult::Continue { modified } => modified,
                 UpstreamResult::SendConnectionRefused => {
                     // Send ConnectionRefused to client and revert state to allow retry
-                    log::debug!("Sending ConnectionRefused and reverting to WaitingForConnect");
                     let refused = serde_json::json!({
                         "cmd": "ConnectionRefused",
                         "errors": ["InvalidPassword"]
@@ -165,8 +163,6 @@ where
                     // Revert state back to WaitingForConnect to allow retry
                     let mut state = state_upstream.lock().await;
                     *state = ConnectionState::WaitingForConnect;
-                    log::debug!("State reverted to WaitingForConnect");
-
                     continue;
                 }
             };
@@ -234,7 +230,6 @@ fn handle_client_messages(state: &mut ConnectionState, messages: &mut Vec<Value>
 
 fn handle_client_message(state: &mut ConnectionState, cmd: &mut Value) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
-    log::debug!("Client message: {:?} in state {:?}", cmd_type, state);
 
     match state {
         ConnectionState::WaitingForRoomInfo => {
@@ -247,7 +242,8 @@ fn handle_client_message(state: &mut ConnectionState, cmd: &mut Value) -> Result
             }
 
             if cmd_type != Some("Connect") {
-                bail!("Received non Connect as the first client message, this is a bug")
+                log::debug!("Received non Connect ({:?}) client message while waiting for connect, dropping it.", cmd_type);
+                return Ok(MessageDecision::Drop)
             }
 
             log::debug!("Intercepted Connect packet");
