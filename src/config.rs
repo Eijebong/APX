@@ -11,6 +11,8 @@ pub struct Config {
     pub apx_api_key: String,
     pub room_id: String,
     pub ap_server: String,
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
 }
 
 impl Config {
@@ -25,6 +27,8 @@ impl Config {
             apx_api_key: std::env::var("APX_API_KEY").context("APX_API_KEY")?,
             room_id: std::env::var("LOBBY_ROOM_ID").context("LOBBY_ROOM_ID")?,
             ap_server: std::env::var("AP_SERVER").context("AP_SERVER")?,
+            tls_cert_path: std::env::var("TLS_CERT_PATH").ok(),
+            tls_key_path: std::env::var("TLS_KEY_PATH").ok(),
         })
     }
 }

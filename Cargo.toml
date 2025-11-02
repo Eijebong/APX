@@ -9,14 +9,17 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_repr = "0.1.20"
 tokio = { version = "1.48.0", features = ["full"] }
-tokio-tungstenite = "0.24"
-tungstenite = "0.24"
+tokio-tungstenite = "0.27"
+tungstenite = { version = "0.27", features = ["deflate"] }
 futures-util = "0.3"
 env_logger = "0.11.8"
 log = "0.4.28"
 reqwest = { version = "0.12.24", features = ["json"] }
 rocket = "0.5.1"
+tokio-rustls = "0.26"
+rustls-pki-types = { version = "1.10", features = ["std"] }
 
 [patch.crates-io]
 figment = { git = "https://github.com/Eijebong/Figment.git" }
 rocket = { git = "https://github.com/Eijebong/Rocket.git", branch = "0.6.0-dev" }
+tungstenite = { git = "https://github.com/signalapp/tungstenite-rs.git" }
