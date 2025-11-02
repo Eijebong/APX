@@ -1,0 +1,22 @@
+loader: taskgraph.loader.transform:loader
+
+kind-dependencies:
+  - docker-image
+
+transforms:
+    - eije_taskgraph.transforms.rust:transforms
+    - taskgraph.transforms.task:transforms
+    - eije_taskgraph.transforms.common:transforms
+
+task-defaults:
+  worker-type-fmt: linux-small
+  worker-type-build: linux-medium
+  with-tests: true
+  skip-argocd-webhook: true
+
+tasks:
+    apx:
+      package-name: apx
+      build-result: /builds/worker/target/release/apx
+      docker-repo: ghcr.io/eijebong/apx
+      skip-unless-changed: ["Cargo.*", "src/**", "taskcluster/**"]
