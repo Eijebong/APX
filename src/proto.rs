@@ -109,7 +109,8 @@ pub struct Connected {
     pub players: Vec<NetworkPlayer>,
     pub missing_locations: Vec<i64>,
     pub checked_locations: Vec<i64>,
-    pub slot_data: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot_data: Option<serde_json::Value>,
     pub slot_info: HashMap<String, SlotInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint_points: Option<i32>,
