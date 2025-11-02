@@ -1,8 +1,10 @@
 use anyhow::{Result, bail};
+use rocket::config::ShutdownConfig;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::{
     net::TcpListener,
+    signal,
     sync::mpsc::{Receiver, channel},
 };
 
@@ -41,8 +43,16 @@ async fn main() -> Result<()> {
         passwords: passwords.clone(),
     };
 
+    let shutdown_config = ShutdownConfig {
+        grace: 0,
+        mercy: 0,
+        ..Default::default()
+    };
+
+    let figment = rocket::Config::figment().merge(("shutdown", shutdown_config));
+
     tokio::spawn(async move {
-        if let Err(e) = rocket::build()
+        if let Err(e) = rocket::custom(figment)
             .manage(app_state)
             .mount("/api", api::routes())
             .launch()
@@ -60,18 +70,28 @@ async fn main() -> Result<()> {
     tokio::spawn(signal_handler(signal_receiver));
 
     loop {
-        let signal_sender = signal_sender.clone();
-        let passwords = passwords.clone();
-        let (socket, addr) = listener.accept().await?;
-        let upstream_url = upstream_url.clone();
+        tokio::select! {
+            result = listener.accept() => {
+                let (socket, addr) = result?;
+                let signal_sender = signal_sender.clone();
+                let passwords = passwords.clone();
+                let upstream_url = upstream_url.clone();
 
-        tokio::spawn(async move {
-            log::debug!("New connection from {}", addr);
-            if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords).await {
-                log::error!("Error handling client {}: {:?}", addr, e);
+                tokio::spawn(async move {
+                    log::debug!("New connection from {}", addr);
+                    if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords).await {
+                        log::error!("Error handling client {}: {:?}", addr, e);
+                    }
+                });
             }
-        });
+            _ = signal::ctrl_c() => {
+                log::info!("Received Ctrl+C, shutting down...");
+                break;
+            }
+        }
     }
+
+    Ok(())
 }
 
 async fn signal_handler(mut receiver: Receiver<Signal>) {

@@ -16,3 +16,7 @@ env_logger = "0.11.8"
 log = "0.4.28"
 reqwest = { version = "0.12.24", features = ["json"] }
 rocket = "0.5.1"
+
+[patch.crates-io]
+figment = { git = "https://github.com/Eijebong/Figment.git" }
+rocket = { git = "https://github.com/Eijebong/Rocket.git", branch = "0.6.0-dev" }
