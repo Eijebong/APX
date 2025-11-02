@@ -41,8 +41,11 @@ pub async fn handle_client(
             };
 
             let Message::Text(text) = msg else {
-                log::error!("Non text message received from client, closing connection");
-                break;
+                if upstream_write.send(msg).await.is_err() {
+                    log::error!("Error while writing non text message");
+                    break;
+                }
+                continue;
             };
 
             let Ok(mut commands) = parse_message(&text) else {
@@ -87,7 +90,10 @@ pub async fn handle_client(
             };
 
             let Message::Text(text) = msg else {
-                log::error!("Non text message received from upstream, closing connection");
+                if client_write.send(msg).await.is_err() {
+                    log::error!("Error while writing non text message");
+                    break;
+                }
                 break;
             };
 
