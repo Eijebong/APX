@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message};
 
 use crate::config::Signal;
-use crate::proto::{Connect, Connected, RoomInfo};
+use crate::proto::{Connected, RoomInfo};
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -146,28 +146,38 @@ fn handle_client_message(state: &mut ConnectionState, messages: &mut [Value]) ->
             bail!("Received message from client while waiting for RoomInfo. This is a client bug.")
         }
         ConnectionState::WaitingForConnect => {
-            if messages.len() != 1 {
+            if messages.is_empty() {
                 bail!(
-                    "Received message that contained more than the connect info from client, this is a client bug."
+                    "Got empty messages while waiting for connect, this is a bug"
                 );
             }
 
-            let cmd = &mut messages[0];
-            if get_cmd(cmd) != Some("Connect") {
-                bail!("Received non Connect as the first client message, this is a bug")
+            for cmd in messages {
+                if get_cmd(cmd) == Some("GetDataPackage") {
+                    log::debug!("Received data package request, letting it through");
+                    continue
+                }
+
+                if get_cmd(cmd) != Some("Connect") {
+                    bail!("Received non Connect as the first client message, this is a bug")
+                }
+
+                log::debug!("Intercepted Connect packet");
+
+                let password = cmd
+                    .get("password")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                // Empty the password before forwarding to upstream
+                if let Some(obj) = cmd.as_object_mut() {
+                    obj.insert("password".to_string(), serde_json::Value::String("".to_string()));
+                }
+
+                *state = ConnectionState::WaitingForConnected { password };
+                modified = true;
             }
-
-            let mut connect = parse_as::<Connect>(cmd)?;
-            log::debug!("Intercepted Connect packet");
-
-            // Store the password for validation when we receive Connected from upstream
-            let password = connect.password.clone();
-
-            // Empty the password before forwarding to upstream
-            connect.password = "".to_string();
-            *cmd = serde_json::to_value(connect)?;
-            *state = ConnectionState::WaitingForConnected { password };
-            modified = true;
         }
         ConnectionState::WaitingForConnected { .. } => {
             bail!(
