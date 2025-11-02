@@ -55,7 +55,7 @@ pub async fn handle_client(
 
             let modified = {
                 let mut state = state_client.lock().await;
-                match handle_client_message(&mut *state, &mut commands) {
+                match handle_client_message(&mut state, &mut commands) {
                     Ok(modified) => modified,
                     Err(e) => {
                         log::error!("Error while handling message from client: {}", e);
@@ -63,6 +63,12 @@ pub async fn handle_client(
                     }
                 }
             };
+
+            // Don't send if all messages were filtered out
+            if modified && commands.is_empty() {
+                log::debug!("All messages filtered out, not forwarding to upstream");
+                continue;
+            }
 
             let msg_to_send = if modified {
                 let Ok(serialized) = serde_json::to_string(&commands) else {
@@ -94,7 +100,7 @@ pub async fn handle_client(
                     log::error!("Error while writing non text message");
                     break;
                 }
-                break;
+                continue;
             };
 
             let Ok(mut commands) = parse_message(&text) else {
@@ -105,7 +111,7 @@ pub async fn handle_client(
             let modified = {
                 let mut state = state_upstream.lock().await;
                 let passwords_read = passwords_upstream.read().await;
-                match handle_upstream_message(&mut *state, &mut commands, &passwords_read) {
+                match handle_upstream_message(&mut state, &mut commands, &passwords_read) {
                     Ok(modified) => modified,
                     Err(e) => {
                         log::error!("Error while handling message from upstream: {}", e);
@@ -138,7 +144,7 @@ pub async fn handle_client(
     Ok(())
 }
 
-fn handle_client_message(state: &mut ConnectionState, messages: &mut [Value]) -> Result<bool> {
+fn handle_client_message(state: &mut ConnectionState, messages: &mut Vec<Value>) -> Result<bool> {
     let mut modified = false;
 
     match state {
@@ -147,15 +153,13 @@ fn handle_client_message(state: &mut ConnectionState, messages: &mut [Value]) ->
         }
         ConnectionState::WaitingForConnect => {
             if messages.is_empty() {
-                bail!(
-                    "Got empty messages while waiting for connect, this is a bug"
-                );
+                bail!("Got empty messages while waiting for connect, this is a bug");
             }
 
             for cmd in messages {
                 if get_cmd(cmd) == Some("GetDataPackage") {
                     log::debug!("Received data package request, letting it through");
-                    continue
+                    continue;
                 }
 
                 if get_cmd(cmd) != Some("Connect") {
@@ -172,7 +176,10 @@ fn handle_client_message(state: &mut ConnectionState, messages: &mut [Value]) ->
 
                 // Empty the password before forwarding to upstream
                 if let Some(obj) = cmd.as_object_mut() {
-                    obj.insert("password".to_string(), serde_json::Value::String("".to_string()));
+                    obj.insert(
+                        "password".to_string(),
+                        serde_json::Value::String("".to_string()),
+                    );
                 }
 
                 *state = ConnectionState::WaitingForConnected { password };
@@ -180,9 +187,16 @@ fn handle_client_message(state: &mut ConnectionState, messages: &mut [Value]) ->
             }
         }
         ConnectionState::WaitingForConnected { .. } => {
-            bail!(
-                "Client should not send any message while waiting for the `Connected` response from upstream"
-            )
+            let original_len = messages.len();
+            messages.retain(|cmd| get_cmd(cmd) == Some("GetDataPackage"));
+
+            if messages.len() < original_len {
+                log::debug!(
+                    "Dropped {} non-GetDataPackage messages while waiting for auth",
+                    original_len - messages.len()
+                );
+                modified = true;
+            }
         }
         ConnectionState::LoggedIn => {}
     }
@@ -221,53 +235,58 @@ fn handle_upstream_message(
         }
         ConnectionState::WaitingForConnected { password } => {
             // We're waiting for Connected or ConnectionRefused from upstream
-            if messages.len() != 1 {
-                bail!(
-                    "Received more messages than expected from upstream while waiting for connection result."
-                );
-            }
+            // But allow DataPackage responses through
+            let password = password.clone();
 
-            let cmd = &messages[0];
-            let cmd_type = get_cmd(cmd);
+            for cmd in messages.iter() {
+                let cmd_type = get_cmd(cmd);
 
-            if cmd_type == Some("Connected") {
-                let connected = parse_as::<Connected>(cmd)?;
-                log::debug!("Intercepted Connected packet for slot {}", connected.slot);
+                if cmd_type == Some("DataPackage") {
+                    log::debug!(
+                        "Allowing DataPackage response through while waiting for Connected"
+                    );
+                    continue;
+                }
 
-                let expected_password = login_info.get(&connected.slot);
+                if cmd_type == Some("Connected") {
+                    let connected = parse_as::<Connected>(cmd)?;
+                    log::debug!("Intercepted Connected packet for slot {}", connected.slot);
 
-                match expected_password {
-                    Some(expected) if !expected.is_empty() => {
-                        // Slot has a password, validate it
-                        if password == expected {
+                    let expected_password = login_info.get(&connected.slot);
+
+                    match expected_password {
+                        Some(expected) if !expected.is_empty() => {
+                            // Slot has a password, validate it
+                            if password == *expected {
+                                log::info!(
+                                    "Password validated successfully for slot {}",
+                                    connected.slot
+                                );
+                                *state = ConnectionState::LoggedIn;
+                            } else {
+                                log::warn!("Invalid password provided for slot {}", connected.slot);
+                                bail!("Invalid password");
+                            }
+                        }
+                        Some(_) | None => {
+                            // Slot has no password (empty string) or not found - allow connection
                             log::info!(
-                                "Password validated successfully for slot {}",
+                                "No password required for slot {}, allowing connection",
                                 connected.slot
                             );
                             *state = ConnectionState::LoggedIn;
-                        } else {
-                            log::warn!("Invalid password provided for slot {}", connected.slot);
-                            bail!("Invalid password");
                         }
                     }
-                    Some(_) | None => {
-                        // Slot has no password (empty string) or not found - allow connection
-                        log::info!(
-                            "No password required for slot {}, allowing connection",
-                            connected.slot
-                        );
-                        *state = ConnectionState::LoggedIn;
-                    }
+                } else if cmd_type == Some("ConnectionRefused") {
+                    // Connection was refused by upstream, just forward it
+                    // Connection will close naturally after this message is sent
+                    log::debug!("Connection refused by upstream");
+                } else {
+                    bail!(
+                        "Expected Connected, ConnectionRefused, or DataPackage, got {:?}",
+                        cmd_type
+                    );
                 }
-            } else if cmd_type == Some("ConnectionRefused") {
-                // Connection was refused by upstream, just forward it
-                // Connection will close naturally after this message is sent
-                log::debug!("Connection refused by upstream");
-            } else {
-                bail!(
-                    "Expected Connected or ConnectionRefused, got {:?}",
-                    cmd_type
-                );
             }
         }
         ConnectionState::LoggedIn => {}
