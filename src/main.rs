@@ -52,9 +52,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    let listener = TcpListener::bind("0.0.0.0:8090").await?;
+    let listener = TcpListener::bind("0.0.0.0:36000").await?;
 
-    log::info!("WebSocket proxy listening on 0.0.0.0:8090");
+    log::info!("WebSocket proxy listening on 0.0.0.0:36000");
     log::info!("Forwarding to {}", upstream_url);
     let (signal_sender, signal_receiver) = channel::<Signal>(1024);
     tokio::spawn(signal_handler(signal_receiver));
