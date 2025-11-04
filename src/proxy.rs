@@ -91,8 +91,9 @@ where
             }
 
             log::debug!(
-                "Forwarding {} commands to upstream (modified: {})",
+                "Forwarding {} ({:?}) commands to upstream (modified: {})",
                 commands.len(),
+                commands.iter().map(|cmd| get_cmd(cmd)).collect::<Vec<_>>(),
                 modified
             );
 
