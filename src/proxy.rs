@@ -44,6 +44,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let state = Arc::new(Mutex::new(ConnectionState::WaitingForRoomInfo));
+    let slot_info = Arc::new(Mutex::new(None::<(u32, String)>));
     let mut config = WebSocketConfig::default();
     config.extensions.permessage_deflate = Some(DeflateConfig::default());
 
@@ -54,6 +55,7 @@ where
     let (mut client_write, mut client_read) = client_ws.split();
 
     let state_client = state.clone();
+    let slot_info_client = slot_info.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -90,10 +92,19 @@ where
                 continue;
             }
 
+            let slot_prefix = {
+                let slot_info = slot_info_client.lock().await;
+                slot_info
+                    .as_ref()
+                    .map(|(slot, name)| format!("[slot {} ({})] ", slot, name))
+                    .unwrap_or_default()
+            };
+
             log::debug!(
-                "Forwarding {} ({:?}) commands to upstream (modified: {})",
+                "{}Forwarding {} ({:?}) commands to upstream (modified: {})",
+                slot_prefix,
                 commands.len(),
-                commands.iter().map(|cmd| get_cmd(cmd)).collect::<Vec<_>>(),
+                CommandList(&commands),
                 modified
             );
 
@@ -115,6 +126,7 @@ where
 
     let state_upstream = state.clone();
     let passwords_upstream = passwords.clone();
+    let slot_info_upstream = slot_info.clone();
     let upstream_to_client = async move {
         while let Some(msg) = upstream_read.next().await {
             let msg = match msg {
@@ -134,6 +146,24 @@ where
                 log::error!("Invalid JSON received from upstream, closing connection");
                 break;
             };
+
+            // Extract slot info from Connected message
+            for cmd in &commands {
+                if get_cmd(cmd) == Some("Connected") {
+                    if let Ok(connected) = parse_as::<Connected>(cmd) {
+                        let player_name = connected
+                            .players
+                            .iter()
+                            .find(|p| p.slot == connected.slot)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
+
+                        let mut info = slot_info_upstream.lock().await;
+                        *info = Some((connected.slot, player_name));
+                        break;
+                    }
+                }
+            }
 
             let result = {
                 let mut state = state_upstream.lock().await;
@@ -167,6 +197,22 @@ where
                     continue;
                 }
             };
+
+            let slot_prefix = {
+                let slot_info = slot_info_upstream.lock().await;
+                slot_info
+                    .as_ref()
+                    .map(|(slot, name)| format!("[slot {} ({})] ", slot, name))
+                    .unwrap_or_default()
+            };
+
+            log::debug!(
+                "{}Forwarding {} ({:?}) commands to client (modified: {})",
+                slot_prefix,
+                commands.len(),
+                CommandList(&commands),
+                modified
+            );
 
             let msg_to_send = if modified {
                 let Ok(serialized) = serde_json::to_string(&commands) else {
@@ -243,8 +289,11 @@ fn handle_client_message(state: &mut ConnectionState, cmd: &mut Value) -> Result
             }
 
             if cmd_type != Some("Connect") {
-                log::debug!("Received non Connect ({:?}) client message while waiting for connect, dropping it.", cmd_type);
-                return Ok(MessageDecision::Drop)
+                log::debug!(
+                    "Received non Connect ({:?}) client message while waiting for connect, dropping it.",
+                    cmd_type
+                );
+                return Ok(MessageDecision::Drop);
             }
 
             log::debug!("Intercepted Connect packet");
@@ -333,7 +382,6 @@ fn handle_upstream_message(
     login_info: &HashMap<u32, String>,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
-    log::debug!("Upstream message: {:?} in state {:?}", cmd_type, state);
 
     match state {
         ConnectionState::WaitingForRoomInfo => {
@@ -419,6 +467,16 @@ fn handle_upstream_message(
 
 fn get_cmd(value: &serde_json::Value) -> Option<&str> {
     value.get("cmd").and_then(|v| v.as_str())
+}
+
+struct CommandList<'a>(&'a [serde_json::Value]);
+
+impl<'a> std::fmt::Debug for CommandList<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|cmd| get_cmd(cmd).unwrap_or("Unknown")))
+            .finish()
+    }
 }
 
 fn parse_as<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T> {
