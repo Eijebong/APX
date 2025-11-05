@@ -46,3 +46,27 @@ async fn refresh_passwords(
 pub fn routes() -> Vec<rocket::Route> {
     rocket::routes![refresh_passwords]
 }
+
+#[derive(Clone)]
+pub struct MetricsRoute(pub rocket_prometheus::PrometheusMetrics);
+
+#[rocket::async_trait]
+impl rocket::route::Handler for MetricsRoute {
+    async fn handle<'r>(
+        &self,
+        req: &'r rocket::Request<'_>,
+        data: rocket::Data<'r>,
+    ) -> rocket::route::Outcome<'r> {
+        let rocket::outcome::Outcome::Success(_api_key) = req.guard::<ApiKey>().await else {
+            return rocket::route::Outcome::Error(rocket::http::Status::Unauthorized);
+        };
+
+        self.0.handle(req, data).await
+    }
+}
+
+impl From<MetricsRoute> for Vec<rocket::Route> {
+    fn from(val: MetricsRoute) -> Self {
+        vec![rocket::Route::new(rocket::http::Method::Get, "/", val)]
+    }
+}

@@ -12,6 +12,7 @@ use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Signal;
+use crate::metrics;
 use crate::proto::{Connected, PrintJSON, RoomInfo, Say};
 
 #[derive(Clone, Debug)]
@@ -40,6 +41,7 @@ pub async fn handle_client<S>(
     upstream_url: &str,
     signal_sender: Sender<Signal>,
     passwords: Arc<RwLock<HashMap<u32, String>>>,
+    room_id: String,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -61,6 +63,7 @@ where
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
     let signal_sender_client = signal_sender.clone();
+    let room_id_client = room_id.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -100,31 +103,47 @@ where
                 }
             };
 
-            if !responses.is_empty()
-                && response_tx.send(responses).await.is_err() {
-                    break;
-                }
+            if !responses.is_empty() && response_tx.send(responses).await.is_err() {
+                break;
+            }
 
             // Don't send if all messages were filtered out
             if commands.is_empty() {
                 continue;
             }
 
-            let slot_prefix = {
-                let slot_info = slot_info_client.lock().await;
-                slot_info
-                    .as_ref()
-                    .map(|(slot, name)| format!("[slot {} ({})] ", slot, name))
-                    .unwrap_or_default()
-            };
+            // Get slot info once for logging and metrics
+            let slot_info_snapshot = slot_info_client.lock().await.clone();
 
-            log::debug!(
-                "{}Forwarding {} ({:?}) commands to upstream (modified: {})",
-                slot_prefix,
-                commands.len(),
-                CommandList(&commands),
-                modified
-            );
+            if let Some((slot, name)) = &slot_info_snapshot {
+                log::debug!(
+                    "[slot {} ({})] Forwarding {} ({:?}) commands to upstream (modified: {})",
+                    slot,
+                    name,
+                    commands.len(),
+                    CommandList(&commands),
+                    modified
+                );
+
+                // Record metrics for each command
+                for cmd in &commands {
+                    if let Some(cmd_type) = get_cmd(cmd) {
+                        metrics::record_message(
+                            &room_id_client,
+                            *slot,
+                            cmd_type,
+                            "client_to_upstream",
+                        );
+                    }
+                }
+            } else {
+                log::debug!(
+                    "Forwarding {} ({:?}) commands to upstream (modified: {})",
+                    commands.len(),
+                    CommandList(&commands),
+                    modified
+                );
+            }
 
             let msg_to_send = if modified {
                 let Ok(serialized) = serde_json::to_string(&commands) else {
@@ -145,6 +164,7 @@ where
     let state_upstream = state.clone();
     let passwords_upstream = passwords.clone();
     let slot_info_upstream = slot_info.clone();
+    let room_id_upstream = room_id.clone();
     let upstream_to_client = async move {
         loop {
             tokio::select! {
@@ -220,21 +240,33 @@ where
                 }
             };
 
-            let slot_prefix = {
-                let slot_info = slot_info_upstream.lock().await;
-                slot_info
-                    .as_ref()
-                    .map(|(slot, name)| format!("[slot {} ({})] ", slot, name))
-                    .unwrap_or_default()
-            };
+            // Get slot info once for logging and metrics
+            let slot_info_snapshot = slot_info_upstream.lock().await.clone();
 
-            log::debug!(
-                "{}Forwarding {} ({:?}) commands to client (modified: {})",
-                slot_prefix,
-                commands.len(),
-                CommandList(&commands),
-                modified
-            );
+            if let Some((slot, name)) = &slot_info_snapshot {
+                log::debug!(
+                    "[slot {} ({})] Forwarding {} ({:?}) commands to client (modified: {})",
+                    slot,
+                    name,
+                    commands.len(),
+                    CommandList(&commands),
+                    modified
+                );
+
+                // Record metrics for each command
+                for cmd in &commands {
+                    if let Some(cmd_type) = get_cmd(cmd) {
+                        metrics::record_message(&room_id_upstream, *slot, cmd_type, "upstream_to_client");
+                    }
+                }
+            } else {
+                log::debug!(
+                    "Forwarding {} ({:?}) commands to client (modified: {})",
+                    commands.len(),
+                    CommandList(&commands),
+                    modified
+                );
+            }
 
             let msg_to_send = if modified {
                 let Ok(serialized) = serde_json::to_string(&commands) else {
@@ -325,21 +357,22 @@ fn handle_client_message(
 
     if cmd_type == Some("Say")
         && let Ok(say) = parse_as::<Say>(cmd)
-            && say.text.starts_with("!countdown") {
-                if let Some((slot, name)) = slot_info {
-                    log::info!("Intercepted !countdown from slot {} ({})", slot, name);
-                    let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
-                } else {
-                    log::warn!("Received !countdown but slot info not available yet");
-                }
+        && say.text.starts_with("!countdown")
+    {
+        if let Some((slot, name)) = slot_info {
+            log::info!("Intercepted !countdown from slot {} ({})", slot, name);
+            let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
+        } else {
+            log::warn!("Received !countdown but slot info not available yet");
+        }
 
-                let denial = PrintJSON::with_color(
-                    "Starting countdowns is not allowed. This attempt has been logged.",
-                    "red",
-                );
-                let denial_value = serde_json::to_value(denial).unwrap();
-                return Ok(MessageDecision::DropWithResponse(denial_value));
-            }
+        let denial = PrintJSON::with_color(
+            "Starting countdowns is not allowed. This attempt has been logged.",
+            "red",
+        );
+        let denial_value = serde_json::to_value(denial).unwrap();
+        return Ok(MessageDecision::DropWithResponse(denial_value));
+    }
 
     match state {
         ConnectionState::WaitingForRoomInfo => {

@@ -11,6 +11,7 @@ use tokio::{
 mod api;
 mod config;
 mod lobby;
+mod metrics;
 mod proto;
 mod proxy;
 mod tls;
@@ -38,6 +39,7 @@ async fn main() -> Result<()> {
     };
 
     let upstream_url = format!("ws://{}", config.ap_server);
+    let room_id = config.room_id.clone();
 
     let app_state = AppState {
         config,
@@ -51,6 +53,15 @@ async fn main() -> Result<()> {
     };
 
     let figment = rocket::Config::figment().merge(("shutdown", shutdown_config));
+
+    let message_counter = metrics::init_metrics();
+    let prometheus = rocket_prometheus::PrometheusMetrics::with_registry(
+        rocket_prometheus::prometheus::Registry::new(),
+    );
+    prometheus
+        .registry()
+        .register(Box::new(message_counter))
+        .expect("Failed to register message counter");
 
     // Load TLS config if provided (before moving app_state)
     let tls_acceptor = if let (Some(cert_path), Some(key_path)) = (
@@ -67,7 +78,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         if let Err(e) = rocket::custom(figment)
             .manage(app_state)
+            .attach(prometheus.clone())
             .mount("/api", api::routes())
+            .mount("/metrics", api::MetricsRoute(prometheus))
             .launch()
             .await
         {
@@ -93,6 +106,7 @@ async fn main() -> Result<()> {
                 let passwords = passwords.clone();
                 let upstream_url = upstream_url.clone();
                 let tls_acceptor = tls_acceptor.clone();
+                let room_id = room_id.clone();
 
                 tokio::spawn(async move {
                     log::debug!("New connection from {}", addr);
@@ -112,7 +126,7 @@ async fn main() -> Result<()> {
                             log::debug!("Accepting TLS connection from {}", addr);
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords).await {
+                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, room_id).await {
                                         log::error!("Error handling TLS client {}: {:?}", addr, e);
                                     }
                                 }
@@ -125,7 +139,7 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         log::debug!("Accepting plain connection from {}", addr);
-                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords).await {
+                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, room_id).await {
                             log::error!("Error handling client {}: {:?}", addr, e);
                         }
                     }
