@@ -12,7 +12,7 @@ use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Signal;
-use crate::proto::{Connected, RoomInfo};
+use crate::proto::{Connected, PrintJSON, RoomInfo, Say};
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -26,6 +26,7 @@ enum MessageDecision {
     Forward,
     Modified,
     Drop,
+    DropWithResponse(Value),
     SendConnectionRefused,
 }
 
@@ -37,7 +38,7 @@ enum UpstreamResult {
 pub async fn handle_client<S>(
     socket: S,
     upstream_url: &str,
-    _signal_sender: Sender<Signal>,
+    signal_sender: Sender<Signal>,
     passwords: Arc<RwLock<HashMap<u32, String>>>,
 ) -> Result<()>
 where
@@ -54,8 +55,12 @@ where
     let (mut upstream_write, mut upstream_read) = upstream_ws.split();
     let (mut client_write, mut client_read) = client_ws.split();
 
+    // Channel for sending responses back to client
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<Vec<Value>>(32);
+
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
+    let signal_sender_client = signal_sender.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -76,16 +81,29 @@ where
                 break;
             };
 
-            let modified = {
+            let (modified, responses) = {
                 let mut state = state_client.lock().await;
-                match handle_client_messages(&mut state, &mut commands) {
-                    Ok(modified) => modified,
+                let slot_info = slot_info_client.lock().await;
+                match handle_client_messages(
+                    &mut state,
+                    &mut commands,
+                    &slot_info,
+                    &signal_sender_client,
+                )
+                .await
+                {
+                    Ok(result) => result,
                     Err(e) => {
                         log::error!("Error while handling message from client: {}", e);
                         break;
                     }
                 }
             };
+
+            if !responses.is_empty()
+                && response_tx.send(responses).await.is_err() {
+                    break;
+                }
 
             // Don't send if all messages were filtered out
             if commands.is_empty() {
@@ -128,7 +146,12 @@ where
     let passwords_upstream = passwords.clone();
     let slot_info_upstream = slot_info.clone();
     let upstream_to_client = async move {
-        while let Some(msg) = upstream_read.next().await {
+        loop {
+            tokio::select! {
+                msg = upstream_read.next() => {
+                    let Some(msg) = msg else {
+                        break;
+                    };
             let msg = match msg {
                 Ok(msg) => msg,
                 Err(_) => break,
@@ -149,8 +172,8 @@ where
 
             // Extract slot info from Connected message
             for cmd in &commands {
-                if get_cmd(cmd) == Some("Connected") {
-                    if let Ok(connected) = parse_as::<Connected>(cmd) {
+                if get_cmd(cmd) == Some("Connected")
+                    && let Ok(connected) = parse_as::<Connected>(cmd) {
                         let player_name = connected
                             .players
                             .iter()
@@ -162,7 +185,6 @@ where
                         *info = Some((connected.slot, player_name));
                         break;
                     }
-                }
             }
 
             let result = {
@@ -224,8 +246,16 @@ where
                 Message::Text(text)
             };
 
-            if client_write.send(msg_to_send).await.is_err() {
-                break;
+                    if client_write.send(msg_to_send).await.is_err() {
+                        break;
+                    }
+                }
+                Some(responses) = response_rx.recv() => {
+                    let response_msg = Message::Text(serde_json::to_string(&responses).unwrap().into());
+                    if client_write.send(response_msg).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     };
@@ -238,16 +268,22 @@ where
     Ok(())
 }
 
-fn handle_client_messages(state: &mut ConnectionState, messages: &mut Vec<Value>) -> Result<bool> {
+async fn handle_client_messages(
+    state: &mut ConnectionState,
+    messages: &mut Vec<Value>,
+    slot_info: &Option<(u32, String)>,
+    signal_sender: &Sender<Signal>,
+) -> Result<(bool, Vec<Value>)> {
     let mut modified = false;
     let mut error = None;
+    let mut responses = Vec::new();
 
     messages.retain_mut(|message| {
         if error.is_some() {
             return false;
         }
 
-        let decision = match handle_client_message(state, message) {
+        let decision = match handle_client_message(state, message, slot_info, signal_sender) {
             Ok(decision) => decision,
             Err(e) => {
                 error = Some(e);
@@ -257,6 +293,10 @@ fn handle_client_messages(state: &mut ConnectionState, messages: &mut Vec<Value>
 
         match decision {
             MessageDecision::Drop => false,
+            MessageDecision::DropWithResponse(response) => {
+                responses.push(response);
+                false
+            }
             MessageDecision::Forward => true,
             MessageDecision::Modified => {
                 modified = true;
@@ -272,11 +312,34 @@ fn handle_client_messages(state: &mut ConnectionState, messages: &mut Vec<Value>
         return Err(e);
     }
 
-    Ok(modified)
+    Ok((modified, responses))
 }
 
-fn handle_client_message(state: &mut ConnectionState, cmd: &mut Value) -> Result<MessageDecision> {
+fn handle_client_message(
+    state: &mut ConnectionState,
+    cmd: &mut Value,
+    slot_info: &Option<(u32, String)>,
+    signal_sender: &Sender<Signal>,
+) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
+
+    if cmd_type == Some("Say")
+        && let Ok(say) = parse_as::<Say>(cmd)
+            && say.text.starts_with("!countdown") {
+                if let Some((slot, name)) = slot_info {
+                    log::info!("Intercepted !countdown from slot {} ({})", slot, name);
+                    let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
+                } else {
+                    log::warn!("Received !countdown but slot info not available yet");
+                }
+
+                let denial = PrintJSON::with_color(
+                    "Starting countdowns is not allowed. This attempt has been logged.",
+                    "red",
+                );
+                let denial_value = serde_json::to_value(denial).unwrap();
+                return Ok(MessageDecision::DropWithResponse(denial_value));
+            }
 
     match state {
         ConnectionState::WaitingForRoomInfo => {
@@ -353,6 +416,9 @@ fn handle_upstream_messages(
 
         match decision {
             MessageDecision::Drop => false,
+            MessageDecision::DropWithResponse(_) => {
+                unreachable!("Upstream messages should never return DropWithResponse")
+            }
             MessageDecision::Forward => true,
             MessageDecision::Modified => {
                 modified = true;

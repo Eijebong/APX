@@ -157,7 +157,7 @@ impl PrintJSON {
             cmd: "PrintJSON".to_string(),
             data: vec![JSONMessagePart {
                 text: text.to_string(),
-                type_: None,
+                type_: Some("color".to_string()),
                 color: Some(color.to_string()),
             }],
             type_: None,
@@ -173,6 +173,12 @@ pub struct JSONMessagePart {
     pub type_: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Say {
+    pub cmd: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
