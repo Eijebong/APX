@@ -13,7 +13,7 @@ use tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Signal;
 use crate::metrics;
-use crate::proto::{Connected, PrintJSON, RoomInfo, Say};
+use crate::proto::{Bounced, Connected, PrintJSON, RoomInfo, Say};
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -125,7 +125,7 @@ where
                     modified
                 );
 
-                // Record metrics for each command
+                // Record metrics and detect DeathLink for each command
                 for cmd in &commands {
                     if let Some(cmd_type) = get_cmd(cmd) {
                         metrics::record_message(
@@ -134,6 +134,36 @@ where
                             cmd_type,
                             "client_to_upstream",
                         );
+                    }
+                    if get_cmd(cmd) == Some("Bounce") {
+                        if let Ok(bounced) = parse_as::<Bounced>(cmd) {
+                            if bounced.tags.contains(&"DeathLink".to_string()) {
+                                let source = bounced
+                                    .data
+                                    .get("source")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unknown")
+                                    .to_string();
+                                let cause = bounced
+                                    .data
+                                    .get("cause")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+
+                                log::info!(
+                                    "DeathLink sent from slot {} ({}): source={}, cause={:?}",
+                                    slot,
+                                    name,
+                                    source,
+                                    cause
+                                );
+                                let _ = signal_sender_client.try_send(Signal::DeathLink {
+                                    slot: *slot,
+                                    source,
+                                    cause,
+                                });
+                            }
+                        }
                     }
                 }
             } else {

@@ -39,6 +39,12 @@ pub struct AppState {
 }
 
 pub enum Signal {
-    DeathLink,
-    CountdownInit { slot: u32 },
+    DeathLink {
+        slot: u32,
+        source: String,
+        cause: Option<String>,
+    },
+    CountdownInit {
+        slot: u32,
+    },
 }

@@ -182,6 +182,14 @@ pub struct Say {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Bounced {
+    pub cmd: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub data: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SlotPasswordInfo {
     pub slot_number: u32,
     pub player_name: String,
