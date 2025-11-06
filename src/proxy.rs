@@ -387,7 +387,7 @@ fn handle_client_message(
 
     if cmd_type == Some("Say")
         && let Ok(say) = parse_as::<Say>(cmd)
-        && say.text.starts_with("!countdown")
+        && is_command(&say.text, "countdown")
     {
         if let Some((slot, name)) = slot_info {
             log::info!("Intercepted !countdown from slot {} ({})", slot, name);
@@ -622,4 +622,84 @@ fn parse_message(text: &str) -> Result<Vec<serde_json::Value>> {
     }
 
     bail!("Could not parse message as JSON")
+}
+
+fn is_command(text: &str, command_name: &str) -> bool {
+    // This matches as best we can the way archipelago does command parsing
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    // try:
+    //     command = shlex.split(raw, comments=False)
+    // except ValueError:  # most likely: "ValueError: No closing quotation"
+    //     command = raw.split()
+    let parts = match shlex::split(trimmed) {
+        Some(parts) => parts,
+        None => trimmed.split_whitespace().map(String::from).collect(),
+    };
+
+    if parts.is_empty() {
+        return false;
+    }
+
+    // basecommand = command[0]
+    // if basecommand[0] == self.marker:
+    //     method = self.commands.get(basecommand[1:].lower(), None)
+    let first = &parts[0];
+    first.starts_with('!') && first[1..].eq_ignore_ascii_case(command_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_command_basic() {
+        assert!(is_command("!countdown", "countdown"));
+        assert!(is_command("  !countdown", "countdown"));
+        assert!(is_command("!countdown 10", "countdown"));
+        assert!(is_command("!COUNTDOWN", "countdown"));
+        assert!(is_command("\"!COUNTDOWN\"", "countdown"));
+        assert!(is_command("'!COUNTDOWN'", "countdown"));
+        assert!(is_command("  !countdown  ", "countdown"));
+        assert!(is_command("  !\\countdown  ", "countdown"));
+        assert!(is_command("  !\"\"countdown  ", "countdown"));
+    }
+
+    #[test]
+    fn test_is_command_with_args() {
+        assert!(is_command("!countdown 30", "countdown"));
+        assert!(is_command("!countdown 30 message", "countdown"));
+        assert!(is_command("!countdown 10 '", "countdown"));
+    }
+
+    #[test]
+    fn test_is_command_with_quotes() {
+        assert!(is_command("!countdown \"some message\"", "countdown"));
+        assert!(is_command("!countdown 'message with spaces'", "countdown"));
+    }
+
+    #[test]
+    fn test_is_command_not_matching() {
+        assert!(!is_command("countdown", "countdown"));
+        assert!(!is_command("!other", "countdown"));
+        assert!(!is_command("!countdownfoo", "countdown"));
+        assert!(!is_command("", "countdown"));
+        assert!(!is_command("  ", "countdown"));
+    }
+
+    #[test]
+    fn test_is_command_embedded_in_text() {
+        assert!(is_command("!countdown", "countdown"));
+        assert!(!is_command("!countdowntest", "countdown"));
+    }
+
+    #[test]
+    fn test_is_command_case_insensitive() {
+        assert!(is_command("!CoUnTdOwN", "countdown"));
+        assert!(is_command("!COUNTDOWN", "countdown"));
+        assert!(is_command("!countdown", "COUNTDOWN"));
+    }
 }

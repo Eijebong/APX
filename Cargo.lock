@@ -255,6 +255,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_repr",
+ "shlex",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",

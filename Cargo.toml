@@ -19,6 +19,7 @@ rocket = "0.5.1"
 rocket_prometheus = { git = "https://github.com/Eijebong/rocket_prometheus.git", branch = "0.6.0-dev" }
 tokio-rustls = "0.26"
 rustls-pki-types = { version = "1.10", features = ["std"] }
+shlex = "1.3"
 
 [patch.crates-io]
 figment = { git = "https://github.com/Eijebong/Figment.git" }
