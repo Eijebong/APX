@@ -202,111 +202,111 @@ where
                     let Some(msg) = msg else {
                         break;
                     };
-            let msg = match msg {
-                Ok(msg) => msg,
-                Err(_) => break,
-            };
+                    let msg = match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    };
 
-            let Message::Text(text) = msg else {
-                if client_write.send(msg).await.is_err() {
-                    log::error!("Error while writing non text message");
-                    break;
-                }
-                continue;
-            };
+                    let Message::Text(text) = msg else {
+                        if client_write.send(msg).await.is_err() {
+                            log::error!("Error while writing non text message");
+                            break;
+                        }
+                        continue;
+                    };
 
-            let Ok(mut commands) = parse_message(&text) else {
-                log::error!("Invalid JSON received from upstream, closing connection");
-                break;
-            };
-
-            // Extract slot info from Connected message
-            for cmd in &commands {
-                if get_cmd(cmd) == Some("Connected")
-                    && let Ok(connected) = parse_as::<Connected>(cmd) {
-                        let player_name = connected
-                            .players
-                            .iter()
-                            .find(|p| p.slot == connected.slot)
-                            .map(|p| p.name.clone())
-                            .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
-
-                        let mut info = slot_info_upstream.lock().await;
-                        *info = Some((connected.slot, player_name));
+                    let Ok(mut commands) = parse_message(&text) else {
+                        log::error!("Invalid JSON received from upstream, closing connection");
                         break;
-                    }
-            }
+                    };
 
-            let result = {
-                let mut state = state_upstream.lock().await;
-                let passwords_read = passwords_upstream.read().await;
-                match handle_upstream_messages(&mut state, &mut commands, &passwords_read) {
-                    Ok(result) => result,
-                    Err(e) => {
-                        log::error!("Error while validating upstream message: {}", e);
-                        break;
-                    }
-                }
-            };
+                    // Extract slot info from Connected message
+                    for cmd in &commands {
+                        if get_cmd(cmd) == Some("Connected")
+                            && let Ok(connected) = parse_as::<Connected>(cmd) {
+                                let player_name = connected
+                                    .players
+                                    .iter()
+                                    .find(|p| p.slot == connected.slot)
+                                    .map(|p| p.name.clone())
+                                    .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
 
-            let modified = match result {
-                UpstreamResult::Continue { modified } => modified,
-                UpstreamResult::SendConnectionRefused => {
-                    // Send ConnectionRefused to client and revert state to allow retry
-                    let refused = serde_json::json!({
-                        "cmd": "ConnectionRefused",
-                        "errors": ["InvalidPassword"]
-                    });
-                    let refused_msg =
-                        Message::Text(serde_json::to_string(&[refused]).unwrap().into());
-                    if client_write.send(refused_msg).await.is_err() {
-                        break;
+                                let mut info = slot_info_upstream.lock().await;
+                                *info = Some((connected.slot, player_name));
+                                break;
+                            }
                     }
 
-                    // Revert state back to WaitingForConnect to allow retry
-                    let mut state = state_upstream.lock().await;
-                    *state = ConnectionState::WaitingForConnect;
-                    continue;
-                }
-            };
+                    let result = {
+                        let mut state = state_upstream.lock().await;
+                        let passwords_read = passwords_upstream.read().await;
+                        match handle_upstream_messages(&mut state, &mut commands, &passwords_read) {
+                            Ok(result) => result,
+                            Err(e) => {
+                                log::error!("Error while validating upstream message: {}", e);
+                                break;
+                            }
+                        }
+                    };
 
-            // Get slot info once for logging and metrics
-            let slot_info_snapshot = slot_info_upstream.lock().await.clone();
+                    let modified = match result {
+                        UpstreamResult::Continue { modified } => modified,
+                        UpstreamResult::SendConnectionRefused => {
+                            // Send ConnectionRefused to client and revert state to allow retry
+                            let refused = serde_json::json!({
+                                "cmd": "ConnectionRefused",
+                                "errors": ["InvalidPassword"]
+                            });
+                            let refused_msg =
+                                Message::Text(serde_json::to_string(&[refused]).unwrap().into());
+                            if client_write.send(refused_msg).await.is_err() {
+                                break;
+                            }
 
-            if let Some((slot, name)) = &slot_info_snapshot {
-                log::debug!(
-                    "[slot {} ({})] Forwarding {} ({:?}) commands to client (modified: {})",
-                    slot,
-                    name,
-                    commands.len(),
-                    CommandList(&commands),
-                    modified
-                );
+                            // Revert state back to WaitingForConnect to allow retry
+                            let mut state = state_upstream.lock().await;
+                            *state = ConnectionState::WaitingForConnect;
+                            continue;
+                        }
+                    };
 
-                // Record metrics for each command
-                for cmd in &commands {
-                    if let Some(cmd_type) = get_cmd(cmd) {
-                        metrics::record_message(&room_id_upstream, *slot, cmd_type, "upstream_to_client");
+                    // Get slot info once for logging and metrics
+                    let slot_info_snapshot = slot_info_upstream.lock().await.clone();
+
+                    if let Some((slot, name)) = &slot_info_snapshot {
+                        log::debug!(
+                            "[slot {} ({})] Forwarding {} ({:?}) commands to client (modified: {})",
+                            slot,
+                            name,
+                            commands.len(),
+                            CommandList(&commands),
+                            modified
+                        );
+
+                        // Record metrics for each command
+                        for cmd in &commands {
+                            if let Some(cmd_type) = get_cmd(cmd) {
+                                metrics::record_message(&room_id_upstream, *slot, cmd_type, "upstream_to_client");
+                            }
+                        }
+                    } else {
+                        log::debug!(
+                            "Forwarding {} ({:?}) commands to client (modified: {})",
+                            commands.len(),
+                            CommandList(&commands),
+                            modified
+                        );
                     }
-                }
-            } else {
-                log::debug!(
-                    "Forwarding {} ({:?}) commands to client (modified: {})",
-                    commands.len(),
-                    CommandList(&commands),
-                    modified
-                );
-            }
 
-            let msg_to_send = if modified {
-                let Ok(serialized) = serde_json::to_string(&commands) else {
-                    log::error!("Error while reserializing commands");
-                    break;
-                };
-                Message::Text(serialized.into())
-            } else {
-                Message::Text(text)
-            };
+                    let msg_to_send = if modified {
+                        let Ok(serialized) = serde_json::to_string(&commands) else {
+                            log::error!("Error while reserializing commands");
+                            break;
+                        };
+                        Message::Text(serialized.into())
+                    } else {
+                        Message::Text(text)
+                    };
 
                     if client_write.send(msg_to_send).await.is_err() {
                         break;
