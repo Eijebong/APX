@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS countdowns;
+DROP TABLE IF EXISTS deathlinks;

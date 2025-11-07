@@ -10,6 +10,7 @@ use tokio::{
 
 mod api;
 mod config;
+mod db;
 mod lobby;
 mod metrics;
 mod proto;
@@ -29,6 +30,8 @@ async fn main() -> Result<()> {
     env_logger::init();
 
     let config = Config::from_env()?;
+
+    let db_pool = db::init_pool(&config.db_url).await?;
 
     let passwords = match refresh_login_info(&config).await {
         Ok(info) => Arc::new(RwLock::new(info)),
@@ -96,7 +99,7 @@ async fn main() -> Result<()> {
     }
     log::info!("Forwarding to {}", upstream_url);
     let (signal_sender, signal_receiver) = channel::<Signal>(1024);
-    tokio::spawn(signal_handler(signal_receiver));
+    tokio::spawn(signal_handler(signal_receiver, db_pool, room_id.clone()));
 
     loop {
         tokio::select! {
@@ -155,8 +158,28 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn signal_handler(mut receiver: Receiver<Signal>) {
-    while let Some(_signal) = receiver.recv().await {}
+async fn signal_handler(mut receiver: Receiver<Signal>, db_pool: db::DieselPool, room_id: String) {
+    while let Some(signal) = receiver.recv().await {
+        match signal {
+            Signal::DeathLink { slot, source, cause } => {
+                let new_deathlink = db::models::NewDeathLink::new(
+                    room_id.clone(),
+                    slot,
+                    source,
+                    cause,
+                );
+                if let Err(e) = db::models::insert_deathlink(&db_pool, new_deathlink).await {
+                    log::error!("Failed to insert deathlink into database: {:?}", e);
+                }
+            }
+            Signal::CountdownInit { slot } => {
+                let new_countdown = db::models::NewCountdown::new(room_id.clone(), slot);
+                if let Err(e) = db::models::insert_countdown(&db_pool, new_countdown).await {
+                    log::error!("Failed to insert countdown into database: {:?}", e);
+                }
+            }
+        }
+    }
 
     log::warn!("Signal channel has been closed")
 }
