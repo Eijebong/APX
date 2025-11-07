@@ -1,9 +1,9 @@
 use anyhow::Result;
+use diesel_async::AsyncPgConnection;
 use diesel_async::async_connection_wrapper::AsyncConnectionWrapper;
 use diesel_async::pooled_connection::deadpool::{Object, Pool};
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
-use diesel_async::AsyncPgConnection;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use rustls::crypto::ring;
 use std::sync::Arc;
 use tokio::task;
@@ -66,32 +66,30 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 
 fn establish_connection(
     config: &str,
-) -> futures_util::future::BoxFuture<
-    '_,
-    Result<AsyncPgConnection, diesel::ConnectionError>,
-> {
+) -> futures_util::future::BoxFuture<'_, Result<AsyncPgConnection, diesel::ConnectionError>> {
     use futures_util::FutureExt;
 
-    let fut = async move {
-        let rustls_config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
-            .with_no_client_auth();
+    let fut =
+        async move {
+            let rustls_config = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+                .with_no_client_auth();
 
-        let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(rustls_config);
 
-        let (client, conn) = tokio_postgres::connect(config, tls)
-            .await
-            .map_err(|e: tokio_postgres::Error| diesel::ConnectionError::BadConnection(e.to_string()))?;
+            let (client, conn) = tokio_postgres::connect(config, tls).await.map_err(
+                |e: tokio_postgres::Error| diesel::ConnectionError::BadConnection(e.to_string()),
+            )?;
 
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                log::error!("Database connection error: {}", e);
-            }
-        });
+            tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    log::error!("Database connection error: {}", e);
+                }
+            });
 
-        AsyncPgConnection::try_from(client).await
-    };
+            AsyncPgConnection::try_from(client).await
+        };
 
     fut.boxed()
 }
@@ -104,7 +102,8 @@ pub async fn init_pool(database_url: &str) -> Result<DieselPool> {
     let mut config = ManagerConfig::default();
     config.custom_setup = Box::new(establish_connection);
 
-    let mgr = AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(database_url, config);
+    let mgr =
+        AsyncDieselConnectionManager::<AsyncPgConnection>::new_with_config(database_url, config);
     let db_pool = DieselPool::builder(mgr)
         .build()
         .expect("Failed to create database pool, aborting");

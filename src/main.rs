@@ -161,13 +161,13 @@ async fn main() -> Result<()> {
 async fn signal_handler(mut receiver: Receiver<Signal>, db_pool: db::DieselPool, room_id: String) {
     while let Some(signal) = receiver.recv().await {
         match signal {
-            Signal::DeathLink { slot, source, cause } => {
-                let new_deathlink = db::models::NewDeathLink::new(
-                    room_id.clone(),
-                    slot,
-                    source,
-                    cause,
-                );
+            Signal::DeathLink {
+                slot,
+                source,
+                cause,
+            } => {
+                let new_deathlink =
+                    db::models::NewDeathLink::new(room_id.clone(), slot, source, cause);
                 if let Err(e) = db::models::insert_deathlink(&db_pool, new_deathlink).await {
                     log::error!("Failed to insert deathlink into database: {:?}", e);
                 }

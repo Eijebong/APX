@@ -126,4 +126,3 @@ pub async fn get_room_countdowns(
 
     Ok(countdowns)
 }
-
