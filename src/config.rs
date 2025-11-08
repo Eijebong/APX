@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::Url;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -36,6 +36,8 @@ impl Config {
 pub struct AppState {
     pub config: Config,
     pub passwords: Arc<RwLock<HashMap<u32, String>>>,
+    pub deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    pub db_pool: crate::db::DieselPool,
 }
 
 pub enum Signal {

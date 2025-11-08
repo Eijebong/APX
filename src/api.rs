@@ -1,7 +1,9 @@
 use rocket::{
     Request, State,
     request::{FromRequest, Outcome},
+    serde::json::Json,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::config::AppState;
 use crate::lobby::refresh_login_info;
@@ -43,8 +45,81 @@ async fn refresh_passwords(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ExclusionListResponse {
+    excluded_slots: Vec<u32>,
+}
+
+#[rocket::get("/deathlink_exclusions")]
+async fn get_deathlink_exclusions(
+    _key: ApiKey,
+    state: &State<AppState>,
+) -> Json<ExclusionListResponse> {
+    let exclusions = state.deathlink_exclusions.read().await;
+    let mut excluded_slots: Vec<u32> = exclusions.iter().copied().collect();
+    excluded_slots.sort_unstable();
+    Json(ExclusionListResponse { excluded_slots })
+}
+
+#[rocket::post("/deathlink_exclusions/<slot>")]
+async fn add_deathlink_exclusion(
+    _key: ApiKey,
+    state: &State<AppState>,
+    slot: u32,
+) -> rocket::http::Status {
+    let mut exclusions = state.deathlink_exclusions.write().await;
+    let newly_added = exclusions.insert(slot);
+
+    if newly_added {
+        log::info!("Added slot {} to deathlink exclusion list", slot);
+        rocket::http::Status::Created
+    } else {
+        log::debug!("Slot {} was already in deathlink exclusion list", slot);
+        rocket::http::Status::Ok
+    }
+}
+
+#[rocket::delete("/deathlink_exclusions/<slot>")]
+async fn remove_deathlink_exclusion(
+    _key: ApiKey,
+    state: &State<AppState>,
+    slot: u32,
+) -> rocket::http::Status {
+    let mut exclusions = state.deathlink_exclusions.write().await;
+    let was_present = exclusions.remove(&slot);
+
+    if was_present {
+        log::info!("Removed slot {} from deathlink exclusion list", slot);
+        rocket::http::Status::Ok
+    } else {
+        log::debug!("Slot {} was not in deathlink exclusion list", slot);
+        rocket::http::Status::NotFound
+    }
+}
+
+#[rocket::get("/deathlinks/<room_id>")]
+async fn get_room_deathlinks(
+    _key: ApiKey,
+    state: &State<AppState>,
+    room_id: &str,
+) -> Result<Json<Vec<crate::db::models::DeathLink>>, rocket::http::Status> {
+    match crate::db::models::get_room_deathlinks(&state.db_pool, room_id).await {
+        Ok(deathlinks) => Ok(Json(deathlinks)),
+        Err(e) => {
+            log::error!("Failed to get deathlinks for room {}: {:?}", room_id, e);
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
+}
+
 pub fn routes() -> Vec<rocket::Route> {
-    rocket::routes![refresh_passwords]
+    rocket::routes![
+        refresh_passwords,
+        get_deathlink_exclusions,
+        add_deathlink_exclusion,
+        remove_deathlink_exclusion,
+        get_room_deathlinks
+    ]
 }
 
 #[derive(Clone)]

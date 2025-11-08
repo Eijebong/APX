@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::Sender;
@@ -41,6 +41,7 @@ pub async fn handle_client<S>(
     upstream_url: &str,
     signal_sender: Sender<Signal>,
     passwords: Arc<RwLock<HashMap<u32, String>>>,
+    deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
     room_id: String,
 ) -> Result<()>
 where
@@ -63,6 +64,7 @@ where
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
     let signal_sender_client = signal_sender.clone();
+    let deathlink_exclusions_client = deathlink_exclusions.clone();
     let room_id_client = room_id.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
@@ -87,11 +89,13 @@ where
             let (modified, responses) = {
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
+                let exclusions = deathlink_exclusions_client.read().await;
                 match handle_client_messages(
                     &mut state,
                     &mut commands,
                     &slot_info,
                     &signal_sender_client,
+                    &exclusions,
                 )
                 .await
                 {
@@ -125,7 +129,7 @@ where
                     modified
                 );
 
-                // Record metrics and detect DeathLink for each command
+                // Record metrics for each command
                 for cmd in &commands {
                     if let Some(cmd_type) = get_cmd(cmd) {
                         metrics::record_message(
@@ -134,36 +138,6 @@ where
                             cmd_type,
                             "client_to_upstream",
                         );
-                    }
-                    if get_cmd(cmd) == Some("Bounce") {
-                        if let Ok(bounced) = parse_as::<Bounced>(cmd) {
-                            if bounced.tags.contains(&"DeathLink".to_string()) {
-                                let source = bounced
-                                    .data
-                                    .get("source")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("Unknown")
-                                    .to_string();
-                                let cause = bounced
-                                    .data
-                                    .get("cause")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-
-                                log::info!(
-                                    "DeathLink sent from slot {} ({}): source={}, cause={:?}",
-                                    slot,
-                                    name,
-                                    source,
-                                    cause
-                                );
-                                let _ = signal_sender_client.try_send(Signal::DeathLink {
-                                    slot: *slot,
-                                    source,
-                                    cause,
-                                });
-                            }
-                        }
                     }
                 }
             } else {
@@ -193,6 +167,7 @@ where
 
     let state_upstream = state.clone();
     let passwords_upstream = passwords.clone();
+    let deathlink_exclusions_upstream = deathlink_exclusions.clone();
     let slot_info_upstream = slot_info.clone();
     let room_id_upstream = room_id.clone();
     let upstream_to_client = async move {
@@ -223,24 +198,33 @@ where
                     // Extract slot info from Connected message
                     for cmd in &commands {
                         if get_cmd(cmd) == Some("Connected")
-                            && let Ok(connected) = parse_as::<Connected>(cmd) {
-                                let player_name = connected
-                                    .players
-                                    .iter()
-                                    .find(|p| p.slot == connected.slot)
-                                    .map(|p| p.name.clone())
-                                    .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
+                            && let Ok(connected) = parse_as::<Connected>(cmd)
+                        {
+                            let player_name = connected
+                                .players
+                                .iter()
+                                .find(|p| p.slot == connected.slot)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
 
-                                let mut info = slot_info_upstream.lock().await;
-                                *info = Some((connected.slot, player_name));
-                                break;
-                            }
+                            let mut info = slot_info_upstream.lock().await;
+                            *info = Some((connected.slot, player_name));
+                            break;
+                        }
                     }
 
                     let result = {
                         let mut state = state_upstream.lock().await;
                         let passwords_read = passwords_upstream.read().await;
-                        match handle_upstream_messages(&mut state, &mut commands, &passwords_read) {
+                        let exclusions = deathlink_exclusions_upstream.read().await;
+                        let slot_info_read = slot_info_upstream.lock().await;
+                        match handle_upstream_messages(
+                            &mut state,
+                            &mut commands,
+                            &passwords_read,
+                            &exclusions,
+                            &slot_info_read,
+                        ) {
                             Ok(result) => result,
                             Err(e) => {
                                 log::error!("Error while validating upstream message: {}", e);
@@ -286,7 +270,12 @@ where
                         // Record metrics for each command
                         for cmd in &commands {
                             if let Some(cmd_type) = get_cmd(cmd) {
-                                metrics::record_message(&room_id_upstream, *slot, cmd_type, "upstream_to_client");
+                                metrics::record_message(
+                                    &room_id_upstream,
+                                    *slot,
+                                    cmd_type,
+                                    "upstream_to_client",
+                                );
                             }
                         }
                     } else {
@@ -335,6 +324,7 @@ async fn handle_client_messages(
     messages: &mut Vec<Value>,
     slot_info: &Option<(u32, String)>,
     signal_sender: &Sender<Signal>,
+    deathlink_exclusions: &HashSet<u32>,
 ) -> Result<(bool, Vec<Value>)> {
     let mut modified = false;
     let mut error = None;
@@ -345,7 +335,13 @@ async fn handle_client_messages(
             return false;
         }
 
-        let decision = match handle_client_message(state, message, slot_info, signal_sender) {
+        let decision = match handle_client_message(
+            state,
+            message,
+            slot_info,
+            signal_sender,
+            deathlink_exclusions,
+        ) {
             Ok(decision) => decision,
             Err(e) => {
                 error = Some(e);
@@ -382,8 +378,54 @@ fn handle_client_message(
     cmd: &mut Value,
     slot_info: &Option<(u32, String)>,
     signal_sender: &Sender<Signal>,
+    deathlink_exclusions: &HashSet<u32>,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
+
+    // Check for DeathLink - handle exclusion and signal emission
+    if cmd_type == Some("Bounce") {
+        if let Ok(bounced) = parse_as::<Bounced>(cmd) {
+            if bounced.tags.contains(&"DeathLink".to_string()) {
+                if let Some((slot, name)) = slot_info {
+                    // Check exclusion first
+                    if deathlink_exclusions.contains(slot) {
+                        log::info!(
+                            "Dropping outgoing DeathLink from excluded slot {} ({})",
+                            slot,
+                            name
+                        );
+                        return Ok(MessageDecision::Drop);
+                    }
+
+                    // Not excluded - emit signal and allow forwarding
+                    let source = bounced
+                        .data
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let cause = bounced
+                        .data
+                        .get("cause")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    log::info!(
+                        "DeathLink sent from slot {} ({}): source={}, cause={:?}",
+                        slot,
+                        name,
+                        source,
+                        cause
+                    );
+                    let _ = signal_sender.try_send(Signal::DeathLink {
+                        slot: *slot,
+                        source,
+                        cause,
+                    });
+                }
+            }
+        }
+    }
 
     if cmd_type == Some("Say")
         && let Ok(say) = parse_as::<Say>(cmd)
@@ -459,6 +501,8 @@ fn handle_upstream_messages(
     state: &mut ConnectionState,
     messages: &mut Vec<Value>,
     login_info: &HashMap<u32, String>,
+    deathlink_exclusions: &HashSet<u32>,
+    slot_info: &Option<(u32, String)>,
 ) -> Result<UpstreamResult> {
     let mut modified = false;
     let mut send_refused = false;
@@ -469,7 +513,13 @@ fn handle_upstream_messages(
             return false;
         }
 
-        let decision = match handle_upstream_message(state, message, login_info) {
+        let decision = match handle_upstream_message(
+            state,
+            message,
+            login_info,
+            deathlink_exclusions,
+            slot_info,
+        ) {
             Ok(decision) => decision,
             Err(e) => {
                 error = Some(e);
@@ -509,8 +559,28 @@ fn handle_upstream_message(
     state: &mut ConnectionState,
     cmd: &mut Value,
     login_info: &HashMap<u32, String>,
+    deathlink_exclusions: &HashSet<u32>,
+    slot_info: &Option<(u32, String)>,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
+
+    // Check for incoming Bounced DeathLink to excluded slots
+    if cmd_type == Some("Bounced") {
+        if let Ok(bounced) = parse_as::<Bounced>(cmd) {
+            if bounced.tags.contains(&"DeathLink".to_string()) {
+                if let Some((slot, name)) = slot_info {
+                    if deathlink_exclusions.contains(slot) {
+                        log::info!(
+                            "Dropping incoming DeathLink for excluded slot {} ({})",
+                            slot,
+                            name
+                        );
+                        return Ok(MessageDecision::Drop);
+                    }
+                }
+            }
+        }
+    }
 
     match state {
         ConnectionState::WaitingForRoomInfo => {

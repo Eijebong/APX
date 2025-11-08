@@ -2575,6 +2575,7 @@ dependencies = [
  "s2n-quic-h3",
  "sentry",
  "serde",
+ "serde_json",
  "state",
  "tempfile",
  "thread_local",

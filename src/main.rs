@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use rocket::config::ShutdownConfig;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::{
@@ -41,12 +42,16 @@ async fn main() -> Result<()> {
         }
     };
 
+    let deathlink_exclusions = Arc::new(RwLock::new(HashSet::new()));
+
     let upstream_url = format!("ws://{}", config.ap_server);
     let room_id = config.room_id.clone();
 
     let app_state = AppState {
         config,
         passwords: passwords.clone(),
+        deathlink_exclusions: deathlink_exclusions.clone(),
+        db_pool: db_pool.clone(),
     };
 
     let shutdown_config = ShutdownConfig {
@@ -107,6 +112,7 @@ async fn main() -> Result<()> {
                 let (socket, addr) = result?;
                 let signal_sender = signal_sender.clone();
                 let passwords = passwords.clone();
+                let deathlink_exclusions = deathlink_exclusions.clone();
                 let upstream_url = upstream_url.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 let room_id = room_id.clone();
@@ -129,7 +135,7 @@ async fn main() -> Result<()> {
                             log::debug!("Accepting TLS connection from {}", addr);
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, room_id).await {
+                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, room_id).await {
                                         log::error!("Error handling TLS client {}: {:?}", addr, e);
                                     }
                                 }
@@ -142,7 +148,7 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         log::debug!("Accepting plain connection from {}", addr);
-                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, room_id).await {
+                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, room_id).await {
                             log::error!("Error handling client {}: {:?}", addr, e);
                         }
                     }
