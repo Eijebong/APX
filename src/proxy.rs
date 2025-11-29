@@ -354,9 +354,13 @@ async fn handle_client_messages(
         };
 
         match decision {
-            MessageDecision::Drop => false,
+            MessageDecision::Drop => {
+                modified = true;
+                false
+            }
             MessageDecision::DropWithResponse(response) => {
                 responses.push(response);
+                modified = true;
                 false
             }
             MessageDecision::Forward => true,
@@ -532,7 +536,10 @@ fn handle_upstream_messages(
         };
 
         match decision {
-            MessageDecision::Drop => false,
+            MessageDecision::Drop => {
+                modified = true;
+                false
+            }
             MessageDecision::DropWithResponse(_) => {
                 unreachable!("Upstream messages should never return DropWithResponse")
             }
