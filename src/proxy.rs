@@ -287,6 +287,10 @@ where
                         );
                     }
 
+                    if commands.is_empty() {
+                        continue;
+                    }
+
                     let msg_to_send = if modified {
                         let Ok(serialized) = serde_json::to_string(&commands) else {
                             log::error!("Error while reserializing commands");
