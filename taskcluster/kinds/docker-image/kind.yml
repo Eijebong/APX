@@ -9,4 +9,3 @@ transforms:
 
 tasks:
     rust-builder: {}
-    apx: {}
