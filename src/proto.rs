@@ -137,6 +137,8 @@ pub struct PrintJSON {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "type")]
     pub type_: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl PrintJSON {
@@ -149,6 +151,7 @@ impl PrintJSON {
                 color: None,
             }],
             type_: None,
+            tags: Vec::new(),
         }
     }
 
@@ -161,6 +164,7 @@ impl PrintJSON {
                 color: Some(color.to_string()),
             }],
             type_: None,
+            tags: Vec::new(),
         }
     }
 }

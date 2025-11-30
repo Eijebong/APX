@@ -593,6 +593,28 @@ fn handle_upstream_message(
         }
     }
 
+    // Hide Admin client connections/disconnections
+    if cmd_type == Some("PrintJSON") {
+        if let Ok(print_json) = parse_as::<PrintJSON>(cmd) {
+            match print_json.type_.as_deref() {
+                Some("Join") if print_json.tags.contains(&"Admin".to_string()) => {
+                    log::debug!("Hiding Admin client join message");
+                    return Ok(MessageDecision::Drop);
+                }
+                Some("Part") => {
+                    // Part messages don't have tags field, but the text includes the tags. It's
+                    // brittle but it's all we have :/
+                    let text: String = print_json.data.iter().map(|p| p.text.as_str()).collect();
+                    if text.contains("'Admin'") {
+                        log::debug!("Hiding Admin client part message");
+                        return Ok(MessageDecision::Drop);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     match state {
         ConnectionState::WaitingForRoomInfo => {
             if get_cmd(cmd) != Some("RoomInfo") {
