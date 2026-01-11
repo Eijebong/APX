@@ -109,7 +109,13 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (socket, addr) = result?;
+                let (socket, addr) = match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        log::error!("Failed to accept connection: {:?}", e);
+                        continue;
+                    }
+                };
                 let signal_sender = signal_sender.clone();
                 let passwords = passwords.clone();
                 let deathlink_exclusions = deathlink_exclusions.clone();
