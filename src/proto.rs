@@ -199,3 +199,10 @@ pub struct SlotPasswordInfo {
     pub player_name: String,
     pub password: Option<String>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GetDataPackage {
+    pub cmd: String,
+    #[serde(default)]
+    pub games: Vec<String>,
+}

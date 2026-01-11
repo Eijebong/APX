@@ -19,8 +19,10 @@ mod proxy;
 mod tls;
 
 use config::{AppState, Config, Signal};
+use futures_util::{SinkExt, StreamExt};
 use lobby::refresh_login_info;
 use proxy::handle_client;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,6 +47,13 @@ async fn main() -> Result<()> {
     let deathlink_exclusions = Arc::new(RwLock::new(HashSet::new()));
 
     let upstream_url = format!("ws://{}", config.ap_server);
+
+    let datapackage = fetch_datapackage(&upstream_url).await?;
+    log::info!(
+        "Cached DataPackage at startup ({} bytes)",
+        datapackage.len()
+    );
+    let datapackage_cache: Arc<str> = datapackage.into();
     let room_id = config.room_id.clone();
 
     let app_state = AppState {
@@ -119,6 +128,7 @@ async fn main() -> Result<()> {
                 let signal_sender = signal_sender.clone();
                 let passwords = passwords.clone();
                 let deathlink_exclusions = deathlink_exclusions.clone();
+                let datapackage_cache = datapackage_cache.clone();
                 let upstream_url = upstream_url.clone();
                 let tls_acceptor = tls_acceptor.clone();
                 let room_id = room_id.clone();
@@ -141,7 +151,7 @@ async fn main() -> Result<()> {
                             log::debug!("Accepting TLS connection from {}", addr);
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, room_id).await {
+                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, datapackage_cache, room_id).await {
                                         log::error!("Error handling TLS client {}: {:?}", addr, e);
                                     }
                                 }
@@ -154,7 +164,7 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         log::debug!("Accepting plain connection from {}", addr);
-                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, room_id).await {
+                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, datapackage_cache, room_id).await {
                             log::error!("Error handling client {}: {:?}", addr, e);
                         }
                     }
@@ -194,4 +204,38 @@ async fn signal_handler(mut receiver: Receiver<Signal>, db_pool: db::DieselPool,
     }
 
     log::warn!("Signal channel has been closed")
+}
+
+async fn fetch_datapackage(upstream_url: &str) -> Result<String> {
+    let (ws, _) = connect_async(upstream_url).await?;
+    let (mut write, mut read) = ws.split();
+
+    while let Some(msg) = read.next().await {
+        let msg = msg?;
+        if let Message::Text(text) = msg {
+            let commands: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+            for cmd in &commands {
+                if cmd.get("cmd").and_then(|v| v.as_str()) == Some("RoomInfo") {
+                    let request = r#"[{"cmd": "GetDataPackage", "games": []}]"#;
+                    write.send(Message::Text(request.into())).await?;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    while let Some(msg) = read.next().await {
+        let msg = msg?;
+        if let Message::Text(text) = msg {
+            let commands: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+            for cmd in commands {
+                if cmd.get("cmd").and_then(|v| v.as_str()) == Some("DataPackage") {
+                    return Ok(serde_json::to_string(&[cmd])?);
+                }
+            }
+        }
+    }
+
+    bail!("Connection closed before receiving DataPackage")
 }

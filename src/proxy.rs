@@ -13,7 +13,7 @@ use tungstenite::protocol::WebSocketConfig;
 
 use crate::config::Signal;
 use crate::metrics;
-use crate::proto::{Bounced, Connected, PrintJSON, RoomInfo, Say};
+use crate::proto::{Bounced, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -28,6 +28,7 @@ enum MessageDecision {
     Modified,
     Drop,
     DropWithResponse(Value),
+    DropWithRawResponse(Arc<str>),
     SendConnectionRefused,
 }
 
@@ -36,12 +37,18 @@ enum UpstreamResult {
     SendConnectionRefused,
 }
 
+enum ClientResponse {
+    Values(Vec<Value>),
+    Raw(Arc<str>),
+}
+
 pub async fn handle_client<S>(
     socket: S,
     upstream_url: &str,
     signal_sender: Sender<Signal>,
     passwords: Arc<RwLock<HashMap<u32, String>>>,
     deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    datapackage_cache: Arc<str>,
     room_id: String,
 ) -> Result<()>
 where
@@ -59,12 +66,13 @@ where
     let (mut client_write, mut client_read) = client_ws.split();
 
     // Channel for sending responses back to client
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<Vec<Value>>(32);
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<ClientResponse>(32);
 
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
     let signal_sender_client = signal_sender.clone();
     let deathlink_exclusions_client = deathlink_exclusions.clone();
+    let datapackage_cache_client = datapackage_cache.clone();
     let room_id_client = room_id.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
@@ -96,6 +104,7 @@ where
                     &slot_info,
                     &signal_sender_client,
                     &exclusions,
+                    &datapackage_cache_client,
                 )
                 .await
                 {
@@ -107,8 +116,10 @@ where
                 }
             };
 
-            if !responses.is_empty() && response_tx.send(responses).await.is_err() {
-                break;
+            if let Some(response) = responses {
+                if response_tx.send(response).await.is_err() {
+                    break;
+                }
             }
 
             // Don't send if all messages were filtered out
@@ -305,8 +316,15 @@ where
                         break;
                     }
                 }
-                Some(responses) = response_rx.recv() => {
-                    let response_msg = Message::Text(serde_json::to_string(&responses).unwrap().into());
+                Some(response) = response_rx.recv() => {
+                    let response_msg = match response {
+                        ClientResponse::Values(values) => {
+                            Message::Text(serde_json::to_string(&values).unwrap().into())
+                        }
+                        ClientResponse::Raw(raw) => {
+                            Message::Text((*raw).into())
+                        }
+                    };
                     if client_write.send(response_msg).await.is_err() {
                         break;
                     }
@@ -329,10 +347,11 @@ async fn handle_client_messages(
     slot_info: &Option<(u32, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<u32>,
-) -> Result<(bool, Vec<Value>)> {
+    datapackage_cache: &Arc<str>,
+) -> Result<(bool, Option<ClientResponse>)> {
     let mut modified = false;
     let mut error = None;
-    let mut responses = Vec::new();
+    let mut response: Option<ClientResponse> = None;
 
     messages.retain_mut(|message| {
         if error.is_some() {
@@ -345,6 +364,7 @@ async fn handle_client_messages(
             slot_info,
             signal_sender,
             deathlink_exclusions,
+            datapackage_cache,
         ) {
             Ok(decision) => decision,
             Err(e) => {
@@ -358,8 +378,13 @@ async fn handle_client_messages(
                 modified = true;
                 false
             }
-            MessageDecision::DropWithResponse(response) => {
-                responses.push(response);
+            MessageDecision::DropWithResponse(value) => {
+                response = Some(ClientResponse::Values(vec![value]));
+                modified = true;
+                false
+            }
+            MessageDecision::DropWithRawResponse(raw) => {
+                response = Some(ClientResponse::Raw(raw));
                 modified = true;
                 false
             }
@@ -378,7 +403,7 @@ async fn handle_client_messages(
         return Err(e);
     }
 
-    Ok((modified, responses))
+    Ok((modified, response))
 }
 
 fn handle_client_message(
@@ -387,8 +412,22 @@ fn handle_client_message(
     slot_info: &Option<(u32, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<u32>,
+    datapackage_cache: &Arc<str>,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
+
+    if cmd_type == Some("GetDataPackage") {
+        if let Ok(request) = parse_as::<GetDataPackage>(cmd) {
+            if request.games.is_empty() {
+                log::info!("Serving DataPackage from cache");
+                return Ok(MessageDecision::DropWithRawResponse(Arc::clone(
+                    datapackage_cache,
+                )));
+            }
+        }
+        // Specific games requested, forward to upstream
+        return Ok(MessageDecision::Forward);
+    }
 
     // Check for DeathLink - handle exclusion and signal emission
     if cmd_type == Some("Bounce") {
@@ -540,7 +579,7 @@ fn handle_upstream_messages(
                 modified = true;
                 false
             }
-            MessageDecision::DropWithResponse(_) => {
+            MessageDecision::DropWithResponse(_) | MessageDecision::DropWithRawResponse(_) => {
                 unreachable!("Upstream messages should never return DropWithResponse")
             }
             MessageDecision::Forward => true,
