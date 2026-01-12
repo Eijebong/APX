@@ -17,6 +17,7 @@ use crate::metrics;
 use crate::proto::{Bounced, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
 
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
+const MAX_SAY_LENGTH: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
@@ -510,23 +511,37 @@ fn handle_client_message(
         }
     }
 
-    if cmd_type == Some("Say")
-        && let Ok(say) = parse_as::<Say>(cmd)
-        && is_command(&say.text, "countdown")
-    {
-        if let Some((slot, name)) = slot_info {
-            log::info!("Intercepted !countdown from slot {} ({})", slot, name);
-            let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
-        } else {
-            log::warn!("Received !countdown but slot info not available yet");
-        }
+    if cmd_type == Some("Say") {
+        if let Ok(say) = parse_as::<Say>(cmd) {
+            if say.text.len() > MAX_SAY_LENGTH {
+                log::warn!(
+                    "Dropping oversized Say message ({} chars)",
+                    say.text.len()
+                );
+                let denial = PrintJSON::with_color(
+                    "Your message is too long. Please reconsider.",
+                    "red",
+                );
+                let denial_value = serde_json::to_value(denial).unwrap();
+                return Ok(MessageDecision::DropWithResponse(denial_value));
+            }
 
-        let denial = PrintJSON::with_color(
-            "Starting countdowns is not allowed. This attempt has been logged.",
-            "red",
-        );
-        let denial_value = serde_json::to_value(denial).unwrap();
-        return Ok(MessageDecision::DropWithResponse(denial_value));
+            if is_command(&say.text, "countdown") {
+                if let Some((slot, name)) = slot_info {
+                    log::info!("Intercepted !countdown from slot {} ({})", slot, name);
+                    let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
+                } else {
+                    log::warn!("Received !countdown but slot info not available yet");
+                }
+
+                let denial = PrintJSON::with_color(
+                    "Starting countdowns is not allowed. This attempt has been logged.",
+                    "red",
+                );
+                let denial_value = serde_json::to_value(denial).unwrap();
+                return Ok(MessageDecision::DropWithResponse(denial_value));
+            }
+        }
     }
 
     match state {
