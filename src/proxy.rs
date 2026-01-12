@@ -15,6 +15,8 @@ use crate::config::Signal;
 use crate::metrics;
 use crate::proto::{Bounced, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
 
+const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
+
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
     WaitingForRoomInfo,
@@ -82,12 +84,27 @@ where
             };
 
             let Message::Text(text) = msg else {
+                if msg.len() > MAX_MESSAGE_SIZE {
+                    log::warn!(
+                        "Dropping oversized non-text message from client ({} bytes)",
+                        msg.len()
+                    );
+                    continue;
+                }
                 if upstream_write.send(msg).await.is_err() {
                     log::error!("Error while writing non text message");
                     break;
                 }
                 continue;
             };
+
+            if text.len() > MAX_MESSAGE_SIZE {
+                log::warn!(
+                    "Dropping oversized message from client ({} bytes)",
+                    text.len()
+                );
+                continue;
+            }
 
             let Ok(mut commands) = parse_message(&text) else {
                 log::error!("Invalid JSON received from client, closing connection");
@@ -194,12 +211,27 @@ where
                     };
 
                     let Message::Text(text) = msg else {
+                        if msg.len() > MAX_MESSAGE_SIZE {
+                            log::warn!(
+                                "Dropping oversized non-text message from upstream ({} bytes)",
+                                msg.len()
+                            );
+                            continue;
+                        }
                         if client_write.send(msg).await.is_err() {
                             log::error!("Error while writing non text message");
                             break;
                         }
                         continue;
                     };
+
+                    if text.len() > MAX_MESSAGE_SIZE {
+                        log::warn!(
+                            "Dropping oversized message from upstream ({} bytes)",
+                            text.len()
+                        );
+                        continue;
+                    }
 
                     let Ok(mut commands) = parse_message(&text) else {
                         log::error!("Invalid JSON received from upstream, closing connection");
