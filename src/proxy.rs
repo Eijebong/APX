@@ -514,14 +514,9 @@ fn handle_client_message(
     if cmd_type == Some("Say") {
         if let Ok(say) = parse_as::<Say>(cmd) {
             if say.text.len() > MAX_SAY_LENGTH {
-                log::warn!(
-                    "Dropping oversized Say message ({} chars)",
-                    say.text.len()
-                );
-                let denial = PrintJSON::with_color(
-                    "Your message is too long. Please reconsider.",
-                    "red",
-                );
+                log::warn!("Dropping oversized Say message ({} chars)", say.text.len());
+                let denial =
+                    PrintJSON::with_color("Your message is too long. Please reconsider.", "red");
                 let denial_value = serde_json::to_value(denial).unwrap();
                 return Ok(MessageDecision::DropWithResponse(denial_value));
             }

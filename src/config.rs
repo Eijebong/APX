@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use reqwest::Url;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 pub struct Config {

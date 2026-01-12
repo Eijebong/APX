@@ -141,7 +141,9 @@ async fn set_deathlink_probability(
 
     let actual = state.deathlink_probability.set(normalized);
     log::info!("DeathLink probability set to {:.2}%", actual * 100.0);
-    Json(ProbabilityResponse { probability: actual })
+    Json(ProbabilityResponse {
+        probability: actual,
+    })
 }
 
 pub fn routes() -> Vec<rocket::Route> {
