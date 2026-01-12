@@ -28,6 +28,7 @@ tokio-postgres = "0.7"
 tokio-postgres-rustls = "0.13"
 rustls = { version = "0.23.12", features = ["ring"] }
 rustls-pki-types = "1.10"
+rand = "0.9"
 
 [patch.crates-io]
 figment = { git = "https://github.com/Eijebong/Figment.git" }

@@ -112,13 +112,47 @@ async fn get_room_deathlinks(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct ProbabilityResponse {
+    probability: f64,
+}
+
+#[rocket::get("/deathlink_probability")]
+async fn get_deathlink_probability(
+    _key: ApiKey,
+    state: &State<AppState>,
+) -> Json<ProbabilityResponse> {
+    let probability = state.deathlink_probability.get();
+    Json(ProbabilityResponse { probability })
+}
+
+#[derive(Deserialize)]
+pub struct SetProbabilityRequest {
+    probability: f64,
+}
+
+#[rocket::put("/deathlink_probability", data = "<request>")]
+async fn set_deathlink_probability(
+    _key: ApiKey,
+    state: &State<AppState>,
+    request: Json<SetProbabilityRequest>,
+) -> Json<ProbabilityResponse> {
+    let normalized = request.probability / 100.0;
+
+    let actual = state.deathlink_probability.set(normalized);
+    log::info!("DeathLink probability set to {:.2}%", actual * 100.0);
+    Json(ProbabilityResponse { probability: actual })
+}
+
 pub fn routes() -> Vec<rocket::Route> {
     rocket::routes![
         refresh_passwords,
         get_deathlink_exclusions,
         add_deathlink_exclusion,
         remove_deathlink_exclusion,
-        get_room_deathlinks
+        get_room_deathlinks,
+        get_deathlink_probability,
+        set_deathlink_probability,
     ]
 }
 

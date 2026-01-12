@@ -18,7 +18,7 @@ mod proto;
 mod proxy;
 mod tls;
 
-use config::{AppState, Config, Signal};
+use config::{AppState, Config, DeathlinkProbability, Signal};
 use futures_util::{SinkExt, StreamExt};
 use lobby::refresh_login_info;
 use proxy::handle_client;
@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     };
 
     let deathlink_exclusions = Arc::new(RwLock::new(HashSet::new()));
+    let deathlink_probability = Arc::new(DeathlinkProbability::default());
 
     let upstream_url = format!("ws://{}", config.ap_server);
 
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
         config,
         passwords: passwords.clone(),
         deathlink_exclusions: deathlink_exclusions.clone(),
+        deathlink_probability: deathlink_probability.clone(),
         db_pool: db_pool.clone(),
     };
 
@@ -128,6 +130,7 @@ async fn main() -> Result<()> {
                 let signal_sender = signal_sender.clone();
                 let passwords = passwords.clone();
                 let deathlink_exclusions = deathlink_exclusions.clone();
+                let deathlink_probability = deathlink_probability.clone();
                 let datapackage_cache = datapackage_cache.clone();
                 let upstream_url = upstream_url.clone();
                 let tls_acceptor = tls_acceptor.clone();
@@ -151,7 +154,7 @@ async fn main() -> Result<()> {
                             log::debug!("Accepting TLS connection from {}", addr);
                             match acceptor.accept(socket).await {
                                 Ok(tls_stream) => {
-                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, datapackage_cache, room_id).await {
+                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, deathlink_probability, datapackage_cache, room_id).await {
                                         log::error!("Error handling TLS client {}: {:?}", addr, e);
                                     }
                                 }
@@ -164,7 +167,7 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         log::debug!("Accepting plain connection from {}", addr);
-                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, datapackage_cache, room_id).await {
+                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, deathlink_probability, datapackage_cache, room_id).await {
                             log::error!("Error handling client {}: {:?}", addr, e);
                         }
                     }

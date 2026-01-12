@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
 
-use crate::config::Signal;
+use crate::config::{DeathlinkProbability, Signal};
 use crate::metrics;
 use crate::proto::{Bounced, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
 
@@ -50,6 +51,7 @@ pub async fn handle_client<S>(
     signal_sender: Sender<Signal>,
     passwords: Arc<RwLock<HashMap<u32, String>>>,
     deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    deathlink_probability: Arc<DeathlinkProbability>,
     datapackage_cache: Arc<str>,
     room_id: String,
 ) -> Result<()>
@@ -196,6 +198,7 @@ where
     let state_upstream = state.clone();
     let passwords_upstream = passwords.clone();
     let deathlink_exclusions_upstream = deathlink_exclusions.clone();
+    let deathlink_probability_upstream = deathlink_probability.clone();
     let slot_info_upstream = slot_info.clone();
     let room_id_upstream = room_id.clone();
     let upstream_to_client = async move {
@@ -267,6 +270,7 @@ where
                             &passwords_read,
                             &exclusions,
                             &slot_info_read,
+                            &deathlink_probability_upstream,
                         ) {
                             Ok(result) => result,
                             Err(e) => {
@@ -582,6 +586,7 @@ fn handle_upstream_messages(
     login_info: &HashMap<u32, String>,
     deathlink_exclusions: &HashSet<u32>,
     slot_info: &Option<(u32, String)>,
+    deathlink_probability: &DeathlinkProbability,
 ) -> Result<UpstreamResult> {
     let mut modified = false;
     let mut send_refused = false;
@@ -598,6 +603,7 @@ fn handle_upstream_messages(
             login_info,
             deathlink_exclusions,
             slot_info,
+            deathlink_probability,
         ) {
             Ok(decision) => decision,
             Err(e) => {
@@ -643,10 +649,10 @@ fn handle_upstream_message(
     login_info: &HashMap<u32, String>,
     deathlink_exclusions: &HashSet<u32>,
     slot_info: &Option<(u32, String)>,
+    deathlink_probability: &DeathlinkProbability,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
 
-    // Check for incoming Bounced DeathLink to excluded slots
     if cmd_type == Some("Bounced") {
         if let Ok(bounced) = parse_as::<Bounced>(cmd) {
             if bounced.tags.contains(&"DeathLink".to_string()) {
@@ -658,6 +664,21 @@ fn handle_upstream_message(
                             name
                         );
                         return Ok(MessageDecision::Drop);
+                    }
+
+                    let probability = deathlink_probability.get();
+                    if probability < 1.0 {
+                        let roll: f64 = rand::rng().random();
+                        if roll >= probability {
+                            log::info!(
+                                "Dropping incoming DeathLink for slot {} ({}) due to probability filter ({:.1}% chance, rolled {:.3})",
+                                slot,
+                                name,
+                                probability * 100.0,
+                                roll
+                            );
+                            return Ok(MessageDecision::Drop);
+                        }
                     }
                 }
             }

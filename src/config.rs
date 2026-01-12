@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use reqwest::Url;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -37,6 +38,7 @@ pub struct AppState {
     pub config: Config,
     pub passwords: Arc<RwLock<HashMap<u32, String>>>,
     pub deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    pub deathlink_probability: Arc<DeathlinkProbability>,
     pub db_pool: crate::db::DieselPool,
 }
 
@@ -49,4 +51,29 @@ pub enum Signal {
     CountdownInit {
         slot: u32,
     },
+}
+
+pub struct DeathlinkProbability(AtomicU64);
+
+impl Default for DeathlinkProbability {
+    fn default() -> Self {
+        Self::new(1.0)
+    }
+}
+
+impl DeathlinkProbability {
+    pub fn new(probability: f64) -> Self {
+        let clamped = probability.clamp(0.0, 1.0);
+        Self(AtomicU64::new(clamped.to_bits()))
+    }
+
+    pub fn get(&self) -> f64 {
+        f64::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    pub fn set(&self, probability: f64) -> f64 {
+        let clamped = probability.clamp(0.0, 1.0);
+        self.0.store(clamped.to_bits(), Ordering::Relaxed);
+        clamped
+    }
 }
