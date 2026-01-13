@@ -219,7 +219,7 @@ async fn fetch_datapackage(upstream_url: &str) -> Result<String> {
             let commands: Vec<serde_json::Value> = serde_json::from_str(&text)?;
             for cmd in &commands {
                 if cmd.get("cmd").and_then(|v| v.as_str()) == Some("RoomInfo") {
-                    let request = r#"[{"cmd": "GetDataPackage", "games": []}]"#;
+                    let request = r#"[{"cmd": "GetDataPackage"}]"#;
                     write.send(Message::Text(request.into())).await?;
                     break;
                 }
