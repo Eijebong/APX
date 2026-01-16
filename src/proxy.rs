@@ -726,7 +726,7 @@ fn handle_upstream_message(
             let mut room_info = parse_as::<RoomInfo>(cmd)?;
             log::debug!("Intercepted RoomInfo packet");
 
-            room_info.set_password(true);
+            room_info.set_password(false);
             *cmd = serde_json::to_value(room_info)?;
             *state = ConnectionState::WaitingForConnect;
             Ok(MessageDecision::Modified)
