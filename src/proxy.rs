@@ -9,6 +9,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
+use tungstenite::Bytes;
 use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
 
@@ -44,6 +45,7 @@ enum UpstreamResult {
 enum ClientResponse {
     Values(Vec<Value>),
     Raw(Arc<str>),
+    Pong(Bytes),
 }
 
 pub async fn handle_client<S>(
@@ -85,6 +87,14 @@ where
                 Ok(msg) => msg,
                 Err(_) => break,
             };
+
+            // Handle ping frames directly. Respond with pong without forwarding to upstream
+            // This should keep clients alive even when the upstream AP server is slow/overloaded
+            if let Message::Ping(data) = &msg {
+                log::trace!("Responding to client ping directly");
+                let _ = response_tx.send(ClientResponse::Pong(data.clone())).await;
+                continue;
+            }
 
             let Message::Text(text) = msg else {
                 if msg.len() > MAX_MESSAGE_SIZE {
@@ -360,6 +370,9 @@ where
                         }
                         ClientResponse::Raw(raw) => {
                             Message::Text((*raw).into())
+                        }
+                        ClientResponse::Pong(data) => {
+                            Message::Pong(data)
                         }
                     };
                     if client_write.send(response_msg).await.is_err() {
