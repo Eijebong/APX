@@ -391,7 +391,10 @@ where
         tokio::time::sleep(AUTH_TIMEOUT).await;
         let state = state_timeout.lock().await;
         if !matches!(*state, ConnectionState::LoggedIn) {
-            log::warn!("Client failed to authenticate within {:?}, closing connection", AUTH_TIMEOUT);
+            log::warn!(
+                "Client failed to authenticate within {:?}, closing connection",
+                AUTH_TIMEOUT
+            );
             true
         } else {
             drop(state);
