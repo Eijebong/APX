@@ -4,6 +4,7 @@ use rand::Rng;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
@@ -12,6 +13,8 @@ use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
 use tungstenite::Bytes;
 use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
+
+const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::config::{DeathlinkProbability, Signal};
 use crate::metrics;
@@ -383,9 +386,27 @@ where
         }
     };
 
+    let state_timeout = state.clone();
+    let auth_timeout = async move {
+        tokio::time::sleep(AUTH_TIMEOUT).await;
+        let state = state_timeout.lock().await;
+        if !matches!(*state, ConnectionState::LoggedIn) {
+            log::warn!("Client failed to authenticate within {:?}, closing connection", AUTH_TIMEOUT);
+            true
+        } else {
+            drop(state);
+            std::future::pending::<bool>().await
+        }
+    };
+
     tokio::select! {
         _ = client_to_upstream => log::debug!("Client connection closed"),
         _ = upstream_to_client => log::debug!("Upstream connection closed"),
+        timed_out = auth_timeout => {
+            if timed_out {
+                log::debug!("Connection closed due to auth timeout");
+            }
+        }
     }
 
     Ok(())
