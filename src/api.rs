@@ -67,15 +67,25 @@ async fn add_deathlink_exclusion(
     state: &State<AppState>,
     slot: u32,
 ) -> rocket::http::Status {
-    let mut exclusions = state.deathlink_exclusions.write().await;
-    let newly_added = exclusions.insert(slot);
+    match crate::db::models::add_deathlink_exclusion(&state.db_pool, &state.config.room_id, slot)
+        .await
+    {
+        Ok(newly_added) => {
+            let mut exclusions = state.deathlink_exclusions.write().await;
+            exclusions.insert(slot);
 
-    if newly_added {
-        log::info!("Added slot {} to deathlink exclusion list", slot);
-        rocket::http::Status::Created
-    } else {
-        log::debug!("Slot {} was already in deathlink exclusion list", slot);
-        rocket::http::Status::Ok
+            if newly_added {
+                log::info!("Added slot {} to deathlink exclusion list", slot);
+                rocket::http::Status::Created
+            } else {
+                log::debug!("Slot {} was already in deathlink exclusion list", slot);
+                rocket::http::Status::Ok
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to persist deathlink exclusion: {:?}", e);
+            rocket::http::Status::InternalServerError
+        }
     }
 }
 
@@ -85,15 +95,28 @@ async fn remove_deathlink_exclusion(
     state: &State<AppState>,
     slot: u32,
 ) -> rocket::http::Status {
-    let mut exclusions = state.deathlink_exclusions.write().await;
-    let was_present = exclusions.remove(&slot);
+    match crate::db::models::remove_deathlink_exclusion(&state.db_pool, &state.config.room_id, slot)
+        .await
+    {
+        Ok(was_present) => {
+            let mut exclusions = state.deathlink_exclusions.write().await;
+            exclusions.remove(&slot);
 
-    if was_present {
-        log::info!("Removed slot {} from deathlink exclusion list", slot);
-        rocket::http::Status::Ok
-    } else {
-        log::debug!("Slot {} was not in deathlink exclusion list", slot);
-        rocket::http::Status::NotFound
+            if was_present {
+                log::info!("Removed slot {} from deathlink exclusion list", slot);
+                rocket::http::Status::Ok
+            } else {
+                log::debug!("Slot {} was not in deathlink exclusion list", slot);
+                rocket::http::Status::NotFound
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "Failed to remove deathlink exclusion from database: {:?}",
+                e
+            );
+            rocket::http::Status::InternalServerError
+        }
     }
 }
 
@@ -136,14 +159,28 @@ async fn set_deathlink_probability(
     _key: ApiKey,
     state: &State<AppState>,
     request: Json<SetProbabilityRequest>,
-) -> Json<ProbabilityResponse> {
+) -> Result<Json<ProbabilityResponse>, rocket::http::Status> {
     let normalized = request.probability / 100.0;
 
-    let actual = state.deathlink_probability.set(normalized);
-    log::info!("DeathLink probability set to {:.2}%", actual * 100.0);
-    Json(ProbabilityResponse {
-        probability: actual,
-    })
+    match crate::db::models::set_deathlink_probability(
+        &state.db_pool,
+        &state.config.room_id,
+        normalized,
+    )
+    .await
+    {
+        Ok(actual) => {
+            state.deathlink_probability.set(actual);
+            log::info!("DeathLink probability set to {:.2}%", actual * 100.0);
+            Ok(Json(ProbabilityResponse {
+                probability: actual,
+            }))
+        }
+        Err(e) => {
+            log::error!("Failed to persist deathlink probability: {:?}", e);
+            Err(rocket::http::Status::InternalServerError)
+        }
+    }
 }
 
 pub fn routes() -> Vec<rocket::Route> {

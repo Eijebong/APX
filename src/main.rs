@@ -44,8 +44,47 @@ async fn main() -> Result<()> {
         }
     };
 
-    let deathlink_exclusions = Arc::new(RwLock::new(HashSet::new()));
-    let deathlink_probability = Arc::new(DeathlinkProbability::default());
+    let deathlink_exclusions = match db::models::get_room_deathlink_exclusions(
+        &db_pool,
+        &config.room_id,
+    )
+    .await
+    {
+        Ok(exclusions) => {
+            let set: HashSet<u32> = exclusions.into_iter().collect();
+            log::info!("Loaded {} deathlink exclusions from database", set.len());
+            Arc::new(RwLock::new(set))
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to load deathlink exclusions from database: {:?}, starting with empty set",
+                e
+            );
+            Arc::new(RwLock::new(HashSet::new()))
+        }
+    };
+
+    let deathlink_probability =
+        match db::models::get_deathlink_settings(&db_pool, &config.room_id).await {
+            Ok(Some(settings)) => {
+                log::info!(
+                    "Loaded deathlink probability from database: {:.2}%",
+                    settings.probability * 100.0
+                );
+                Arc::new(DeathlinkProbability::new(settings.probability))
+            }
+            Ok(None) => {
+                log::info!("No deathlink probability in database, using default 100%");
+                Arc::new(DeathlinkProbability::default())
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to load deathlink probability from database: {:?}, using default 100%",
+                    e
+                );
+                Arc::new(DeathlinkProbability::default())
+            }
+        };
 
     let upstream_url = format!("ws://{}", config.ap_server);
 
