@@ -61,12 +61,11 @@ where
 {
     let state = Arc::new(Mutex::new(ConnectionState::WaitingForRoomInfo));
     let slot_info = Arc::new(Mutex::new(None::<(u32, String)>));
+    let mut config = WebSocketConfig::default();
+    config.extensions.permessage_deflate = Some(DeflateConfig::default());
 
-    let mut client_config = WebSocketConfig::default();
-    client_config.extensions.permessage_deflate = Some(DeflateConfig::default());
-
-    let client_ws = accept_async_with_config(socket, Some(client_config)).await?;
-    let (upstream_ws, _) = connect_async_with_config(upstream_url, None, false).await?;
+    let client_ws = accept_async_with_config(socket, Some(config)).await?;
+    let (upstream_ws, _) = connect_async_with_config(upstream_url, Some(config), false).await?;
 
     let (mut upstream_write, mut upstream_read) = upstream_ws.split();
     let (mut client_write, mut client_read) = client_ws.split();
