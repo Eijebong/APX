@@ -733,6 +733,7 @@ fn handle_upstream_message(
     }
 
     // Hide Admin client connections/disconnections
+    // Also hide cheat console as that is used by admins
     if cmd_type == Some("PrintJSON") {
         if let Ok(print_json) = parse_as::<PrintJSON>(cmd) {
             match print_json.type_.as_deref() {
@@ -746,6 +747,16 @@ fn handle_upstream_message(
                     let text: String = print_json.data.iter().map(|p| p.text.as_str()).collect();
                     if text.contains("'Admin'") {
                         log::debug!("Hiding Admin client part message");
+                        return Ok(MessageDecision::Drop);
+                    }
+                }
+                Some("ItemCheat") => return Ok(MessageDecision::Drop),
+                None => {
+                    let is_cheat_console = print_json
+                        .data
+                        .iter()
+                        .any(|data| data.text.contains("Cheat console"));
+                    if is_cheat_console {
                         return Ok(MessageDecision::Drop);
                     }
                 }
