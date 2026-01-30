@@ -60,6 +60,7 @@ pub async fn handle_client<S>(
     deathlink_probability: Arc<DeathlinkProbability>,
     datapackage_cache: Arc<str>,
     room_id: String,
+    inject_notext: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -138,6 +139,7 @@ where
                     &signal_sender_client,
                     &exclusions,
                     &datapackage_cache_client,
+                    inject_notext,
                 )
                 .await
                 {
@@ -422,6 +424,7 @@ async fn handle_client_messages(
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<u32>,
     datapackage_cache: &Arc<str>,
+    inject_notext: bool,
 ) -> Result<(bool, Option<ClientResponse>)> {
     let mut modified = false;
     let mut error = None;
@@ -439,6 +442,7 @@ async fn handle_client_messages(
             signal_sender,
             deathlink_exclusions,
             datapackage_cache,
+            inject_notext,
         ) {
             Ok(decision) => decision,
             Err(e) => {
@@ -487,6 +491,7 @@ fn handle_client_message(
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<u32>,
     datapackage_cache: &Arc<str>,
+    inject_notext: bool,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
 
@@ -602,12 +607,22 @@ fn handle_client_message(
                 .unwrap_or("")
                 .to_string();
 
-            // Empty the password before forwarding to upstream
             if let Some(obj) = cmd.as_object_mut() {
+                // Empty the password before forwarding to upstream
                 obj.insert(
                     "password".to_string(),
                     serde_json::Value::String("".to_string()),
                 );
+
+                if inject_notext {
+                    let tags = obj
+                        .entry("tags")
+                        .or_insert_with(|| serde_json::Value::Array(vec![]));
+                    if let Some(tags_array) = tags.as_array_mut() {
+                        tags_array.push(serde_json::Value::String("NoText".to_string()));
+                        log::debug!("Injected NoText tag into Connect");
+                    }
+                }
             }
 
             *state = ConnectionState::WaitingForConnected { password };

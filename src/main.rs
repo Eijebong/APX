@@ -147,8 +147,10 @@ async fn main() -> Result<()> {
     });
 
     let listener = TcpListener::bind("0.0.0.0:36000").await?;
+    let notext_listener = TcpListener::bind("0.0.0.0:36001").await?;
 
     log::info!("WebSocket proxy listening on 0.0.0.0:36000");
+    log::info!("WebSocket proxy (NoText) listening on 0.0.0.0:36001");
     if tls_acceptor.is_some() {
         log::info!("TLS enabled - supporting both WS and WSS");
     }
@@ -157,66 +159,104 @@ async fn main() -> Result<()> {
     tokio::spawn(signal_handler(signal_receiver, db_pool, room_id.clone()));
 
     loop {
-        tokio::select! {
+        let (socket, addr, inject_notext) = tokio::select! {
             result = listener.accept() => {
-                let (socket, addr) = match result {
-                    Ok(conn) => conn,
+                match result {
+                    Ok((socket, addr)) => (socket, addr, false),
                     Err(e) => {
                         log::error!("Failed to accept connection: {:?}", e);
                         continue;
                     }
-                };
-                let signal_sender = signal_sender.clone();
-                let passwords = passwords.clone();
-                let deathlink_exclusions = deathlink_exclusions.clone();
-                let deathlink_probability = deathlink_probability.clone();
-                let datapackage_cache = datapackage_cache.clone();
-                let upstream_url = upstream_url.clone();
-                let tls_acceptor = tls_acceptor.clone();
-                let room_id = room_id.clone();
-
-                tokio::spawn(async move {
-                    log::debug!("New connection from {}", addr);
-
-                    // Peek at first byte to detect TLS
-                    let mut buf = [0u8; 1];
-                    if let Err(e) = socket.peek(&mut buf).await {
-                        log::error!("Failed to peek at connection from {}: {:?}", addr, e);
-                        return;
+                }
+            }
+            result = notext_listener.accept() => {
+                match result {
+                    Ok((socket, addr)) => (socket, addr, true),
+                    Err(e) => {
+                        log::error!("Failed to accept NoText connection: {:?}", e);
+                        continue;
                     }
-
-                    // 0x16 is the TLS handshake record type
-                    let is_tls = buf[0] == 0x16;
-
-                    if is_tls {
-                        if let Some(acceptor) = tls_acceptor {
-                            log::debug!("Accepting TLS connection from {}", addr);
-                            match acceptor.accept(socket).await {
-                                Ok(tls_stream) => {
-                                    if let Err(e) = handle_client(tls_stream, &upstream_url, signal_sender, passwords, deathlink_exclusions, deathlink_probability, datapackage_cache, room_id).await {
-                                        log::error!("Error handling TLS client {}: {:?}", addr, e);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("TLS handshake failed for {}: {:?}", addr, e);
-                                }
-                            }
-                        } else {
-                            log::warn!("Client {} attempted TLS but TLS is not configured", addr);
-                        }
-                    } else {
-                        log::debug!("Accepting plain connection from {}", addr);
-                        if let Err(e) = handle_client(socket, &upstream_url, signal_sender, passwords, deathlink_exclusions, deathlink_probability, datapackage_cache, room_id).await {
-                            log::error!("Error handling client {}: {:?}", addr, e);
-                        }
-                    }
-                });
+                }
             }
             _ = signal::ctrl_c() => {
                 log::info!("Received Ctrl+C, shutting down...");
                 break;
             }
-        }
+        };
+
+        let signal_sender = signal_sender.clone();
+        let passwords = passwords.clone();
+        let deathlink_exclusions = deathlink_exclusions.clone();
+        let deathlink_probability = deathlink_probability.clone();
+        let datapackage_cache = datapackage_cache.clone();
+        let upstream_url = upstream_url.clone();
+        let tls_acceptor = tls_acceptor.clone();
+        let room_id = room_id.clone();
+
+        tokio::spawn(async move {
+            if inject_notext {
+                log::debug!("New NoText connection from {}", addr);
+            } else {
+                log::debug!("New connection from {}", addr);
+            }
+
+            // Peek at first byte to detect TLS
+            let mut buf = [0u8; 1];
+            if let Err(e) = socket.peek(&mut buf).await {
+                log::error!("Failed to peek at connection from {}: {:?}", addr, e);
+                return;
+            }
+
+            // 0x16 is the TLS handshake record type
+            let is_tls = buf[0] == 0x16;
+
+            if is_tls {
+                if let Some(acceptor) = tls_acceptor {
+                    log::debug!("Accepting TLS connection from {}", addr);
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            if let Err(e) = handle_client(
+                                tls_stream,
+                                &upstream_url,
+                                signal_sender,
+                                passwords,
+                                deathlink_exclusions,
+                                deathlink_probability,
+                                datapackage_cache,
+                                room_id,
+                                inject_notext,
+                            )
+                            .await
+                            {
+                                log::error!("Error handling TLS client {}: {:?}", addr, e);
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("TLS handshake failed for {}: {:?}", addr, e);
+                        }
+                    }
+                } else {
+                    log::warn!("Client {} attempted TLS but TLS is not configured", addr);
+                }
+            } else {
+                log::debug!("Accepting plain connection from {}", addr);
+                if let Err(e) = handle_client(
+                    socket,
+                    &upstream_url,
+                    signal_sender,
+                    passwords,
+                    deathlink_exclusions,
+                    deathlink_probability,
+                    datapackage_cache,
+                    room_id,
+                    inject_notext,
+                )
+                .await
+                {
+                    log::error!("Error handling client {}: {:?}", addr, e);
+                }
+            }
+        });
     }
 
     Ok(())
