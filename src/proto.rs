@@ -206,3 +206,12 @@ pub struct GetDataPackage {
     #[serde(default)]
     pub games: Vec<String>,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConnectUpdate {
+    pub cmd: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub items_handling: Option<u8>,
+}

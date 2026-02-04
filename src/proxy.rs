@@ -18,7 +18,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::config::{DeathlinkProbability, Signal};
 use crate::metrics;
-use crate::proto::{Bounced, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
+use crate::proto::{Bounced, ConnectUpdate, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
 
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
 const MAX_SAY_LENGTH: usize = 2000;
@@ -33,6 +33,7 @@ pub enum ConnectionState {
 
 enum MessageDecision {
     Forward,
+    ForwardAndInject(Value),
     Modified,
     Drop,
     DropWithResponse(Value),
@@ -41,7 +42,10 @@ enum MessageDecision {
 }
 
 enum UpstreamResult {
-    Continue { modified: bool },
+    Continue {
+        modified: bool,
+        inject_response: Option<Value>,
+    },
     SendConnectionRefused,
 }
 
@@ -217,6 +221,7 @@ where
     let deathlink_probability_upstream = deathlink_probability.clone();
     let slot_info_upstream = slot_info.clone();
     let room_id_upstream = room_id.clone();
+    let inject_notext_upstream = inject_notext;
     let upstream_to_client = async move {
         loop {
             tokio::select! {
@@ -287,6 +292,7 @@ where
                             &exclusions,
                             &slot_info_read,
                             &deathlink_probability_upstream,
+                            inject_notext_upstream,
                         ) {
                             Ok(result) => result,
                             Err(e) => {
@@ -296,8 +302,8 @@ where
                         }
                     };
 
-                    let modified = match result {
-                        UpstreamResult::Continue { modified } => modified,
+                    let (mut modified, inject_response) = match result {
+                        UpstreamResult::Continue { modified, inject_response } => (modified, inject_response),
                         UpstreamResult::SendConnectionRefused => {
                             // Send ConnectionRefused to client and revert state to allow retry
                             let refused = serde_json::json!({
@@ -316,6 +322,11 @@ where
                             continue;
                         }
                     };
+
+                    if let Some(response) = inject_response {
+                        commands.push(response);
+                        modified = true;
+                    }
 
                     // Get slot info once for logging and metrics
                     let slot_info_snapshot = slot_info_upstream.lock().await.clone();
@@ -471,8 +482,10 @@ async fn handle_client_messages(
                 modified = true;
                 true
             }
-            MessageDecision::SendConnectionRefused => {
-                unreachable!("Client messages should never return SendConnectionRefused")
+            MessageDecision::ForwardAndInject(_) | MessageDecision::SendConnectionRefused => {
+                unreachable!(
+                    "Client messages should never return ForwardAndInject or SendConnectionRefused"
+                )
             }
         }
     });
@@ -619,7 +632,9 @@ fn handle_client_message(
                         .entry("tags")
                         .or_insert_with(|| serde_json::Value::Array(vec![]));
                     if let Some(tags_array) = tags.as_array_mut() {
-                        tags_array.push(serde_json::Value::String("NoText".to_string()));
+                        if !tags_array.contains(&serde_json::Value::String("NoText".to_string())) {
+                            tags_array.push(serde_json::Value::String("NoText".to_string()));
+                        }
                         log::debug!("Injected NoText tag into Connect");
                     }
                 }
@@ -638,7 +653,19 @@ fn handle_client_message(
             }
             Ok(MessageDecision::Forward)
         }
-        ConnectionState::LoggedIn => Ok(MessageDecision::Forward),
+        ConnectionState::LoggedIn => {
+            if inject_notext && cmd_type == Some("ConnectUpdate") {
+                if let Ok(mut update) = parse_as::<ConnectUpdate>(cmd) {
+                    if !update.tags.contains(&"NoText".to_string()) {
+                        log::debug!("Injecting NoText tag into ConnectUpdate");
+                        update.tags.push("NoText".to_string());
+                        *cmd = serde_json::to_value(update)?;
+                        return Ok(MessageDecision::Modified);
+                    }
+                }
+            }
+            Ok(MessageDecision::Forward)
+        }
     }
 }
 
@@ -649,10 +676,12 @@ fn handle_upstream_messages(
     deathlink_exclusions: &HashSet<u32>,
     slot_info: &Option<(u32, String)>,
     deathlink_probability: &DeathlinkProbability,
+    inject_notext: bool,
 ) -> Result<UpstreamResult> {
     let mut modified = false;
     let mut send_refused = false;
     let mut error = None;
+    let mut inject_response = None;
 
     messages.retain_mut(|message| {
         if send_refused || error.is_some() {
@@ -666,6 +695,7 @@ fn handle_upstream_messages(
             deathlink_exclusions,
             slot_info,
             deathlink_probability,
+            inject_notext,
         ) {
             Ok(decision) => decision,
             Err(e) => {
@@ -683,6 +713,10 @@ fn handle_upstream_messages(
                 unreachable!("Upstream messages should never return DropWithResponse")
             }
             MessageDecision::Forward => true,
+            MessageDecision::ForwardAndInject(response) => {
+                inject_response = Some(response);
+                true
+            }
             MessageDecision::Modified => {
                 modified = true;
                 true
@@ -702,7 +736,10 @@ fn handle_upstream_messages(
         return Ok(UpstreamResult::SendConnectionRefused);
     }
 
-    Ok(UpstreamResult::Continue { modified })
+    Ok(UpstreamResult::Continue {
+        modified,
+        inject_response,
+    })
 }
 
 fn handle_upstream_message(
@@ -712,6 +749,7 @@ fn handle_upstream_message(
     deathlink_exclusions: &HashSet<u32>,
     slot_info: &Option<(u32, String)>,
     deathlink_probability: &DeathlinkProbability,
+    inject_notext: bool,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
 
@@ -825,26 +863,32 @@ fn handle_upstream_message(
 
                 match expected_password {
                     Some(expected) if !expected.is_empty() => {
-                        // Slot has a password, validate it
-                        if password == *expected {
-                            log::info!(
-                                "Password validated successfully for slot {}",
-                                connected.slot
-                            );
-                            *state = ConnectionState::LoggedIn;
-                        } else {
+                        if password != *expected {
                             log::warn!("Invalid password provided for slot {}", connected.slot);
                             return Ok(MessageDecision::SendConnectionRefused);
                         }
+                        log::info!(
+                            "Password validated successfully for slot {} (notext: {})",
+                            connected.slot,
+                            inject_notext
+                        );
                     }
                     Some(_) | None => {
-                        // Slot has no password (empty string) or not found - allow connection
                         log::info!(
-                            "No password required for slot {}, allowing connection",
-                            connected.slot
+                            "No password required for slot {}, allowing connection (notext: {})",
+                            connected.slot,
+                            inject_notext
                         );
-                        *state = ConnectionState::LoggedIn;
                     }
+                }
+
+                *state = ConnectionState::LoggedIn;
+                if inject_notext {
+                    let confirmation =
+                        PrintJSON::with_color("Connected to APX proxy (NoText mode)", "green");
+                    return Ok(MessageDecision::ForwardAndInject(serde_json::to_value(
+                        confirmation,
+                    )?));
                 }
                 Ok(MessageDecision::Forward)
             } else if cmd_type == Some("ConnectionRefused") {
