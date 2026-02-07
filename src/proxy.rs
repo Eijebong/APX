@@ -10,15 +10,17 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, RwLock};
 use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::{connect_async_with_config, tungstenite::Message};
-use tungstenite::Bytes;
 use tungstenite::extensions::compression::deflate::DeflateConfig;
 use tungstenite::protocol::WebSocketConfig;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
+use aprs_proto::primitives::SlotId;
+
 use crate::config::{DeathlinkProbability, Signal};
 use crate::metrics;
 use crate::proto::{Bounced, ConnectUpdate, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
+use crate::registry::{ClientEntry, ClientRegistry, ClientResponse};
 
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
 const MAX_SAY_LENGTH: usize = 2000;
@@ -27,50 +29,61 @@ const MAX_SAY_LENGTH: usize = 2000;
 pub enum ConnectionState {
     WaitingForRoomInfo,
     WaitingForConnect,
-    WaitingForConnected { password: String },
+    WaitingForConnected {
+        password: String,
+        tags: Vec<String>,
+        game: String,
+    },
     LoggedIn,
 }
 
 enum MessageDecision {
     Forward,
-    ForwardAndInject(Value),
+    ForwardWithRegistration {
+        registration: RegistrationData,
+        inject_response: Option<Value>,
+    },
     Modified,
     Drop,
+    DropAndRoute,
     DropWithResponse(Value),
     DropWithRawResponse(Arc<str>),
     SendConnectionRefused,
+}
+
+struct RegistrationData {
+    slot: SlotId,
+    team: aprs_proto::primitives::TeamId,
+    game: String,
+    tags: Vec<String>,
 }
 
 enum UpstreamResult {
     Continue {
         modified: bool,
         inject_response: Option<Value>,
+        registration: Option<RegistrationData>,
     },
     SendConnectionRefused,
-}
-
-enum ClientResponse {
-    Values(Vec<Value>),
-    Raw(Arc<str>),
-    Pong(Bytes),
 }
 
 pub async fn handle_client<S>(
     socket: S,
     upstream_url: &str,
     signal_sender: Sender<Signal>,
-    passwords: Arc<RwLock<HashMap<u32, String>>>,
-    deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    passwords: Arc<RwLock<HashMap<SlotId, String>>>,
+    deathlink_exclusions: Arc<RwLock<HashSet<SlotId>>>,
     deathlink_probability: Arc<DeathlinkProbability>,
     datapackage_cache: Arc<str>,
     room_id: String,
     inject_notext: bool,
+    client_registry: Arc<ClientRegistry>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let state = Arc::new(Mutex::new(ConnectionState::WaitingForRoomInfo));
-    let slot_info = Arc::new(Mutex::new(None::<(u32, String)>));
+    let slot_info = Arc::new(Mutex::new(None::<(SlotId, String)>));
     let mut config = WebSocketConfig::default();
     config.extensions.permessage_deflate = Some(DeflateConfig::default());
 
@@ -82,13 +95,17 @@ where
 
     // Channel for sending responses back to client
     let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<ClientResponse>(32);
+    let response_tx_for_registry = response_tx.clone();
+    let client_id = ClientRegistry::allocate_id();
 
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
     let signal_sender_client = signal_sender.clone();
     let deathlink_exclusions_client = deathlink_exclusions.clone();
+    let deathlink_probability_client = deathlink_probability.clone();
     let datapackage_cache_client = datapackage_cache.clone();
     let room_id_client = room_id.clone();
+    let client_registry_client = client_registry.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -132,7 +149,7 @@ where
                 break;
             };
 
-            let (modified, responses) = {
+            let (modified, responses, bounces_to_route, tag_update) = {
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
                 let exclusions = deathlink_exclusions_client.read().await;
@@ -155,6 +172,22 @@ where
                 }
             };
 
+            for bounce in &bounces_to_route {
+                let exclusions = deathlink_exclusions_client.read().await;
+                client_registry_client
+                    .route_bounce(
+                        client_id,
+                        bounce,
+                        &exclusions,
+                        &deathlink_probability_client,
+                    )
+                    .await;
+            }
+
+            if let Some(tags) = tag_update {
+                client_registry_client.update_tags(client_id, tags).await;
+            }
+
             if let Some(response) = responses {
                 if response_tx.send(response).await.is_err() {
                     break;
@@ -172,7 +205,7 @@ where
             if let Some((slot, name)) = &slot_info_snapshot {
                 log::debug!(
                     "[slot {} ({})] Forwarding {} ({:?}) commands to upstream (modified: {})",
-                    slot,
+                    slot.0,
                     name,
                     commands.len(),
                     CommandList(&commands),
@@ -222,6 +255,7 @@ where
     let slot_info_upstream = slot_info.clone();
     let room_id_upstream = room_id.clone();
     let inject_notext_upstream = inject_notext;
+    let client_registry_cleanup = client_registry.clone();
     let upstream_to_client = async move {
         loop {
             tokio::select! {
@@ -272,7 +306,7 @@ where
                                 .iter()
                                 .find(|p| p.slot == connected.slot)
                                 .map(|p| p.name.clone())
-                                .unwrap_or_else(|| format!("Unknown-{}", connected.slot));
+                                .unwrap_or_else(|| format!("Unknown-{}", connected.slot.0));
 
                             let mut info = slot_info_upstream.lock().await;
                             *info = Some((connected.slot, player_name));
@@ -302,8 +336,8 @@ where
                         }
                     };
 
-                    let (mut modified, inject_response) = match result {
-                        UpstreamResult::Continue { modified, inject_response } => (modified, inject_response),
+                    let (mut modified, inject_response, registration) = match result {
+                        UpstreamResult::Continue { modified, inject_response, registration } => (modified, inject_response, registration),
                         UpstreamResult::SendConnectionRefused => {
                             // Send ConnectionRefused to client and revert state to allow retry
                             let refused = serde_json::json!({
@@ -328,13 +362,26 @@ where
                         modified = true;
                     }
 
+                    if let Some(reg) = registration {
+                        client_registry.register(
+                            client_id,
+                            ClientEntry {
+                                slot: reg.slot,
+                                team: reg.team,
+                                game: reg.game,
+                                tags: reg.tags.into_iter().collect(),
+                                sender: response_tx_for_registry.clone(),
+                            },
+                        ).await;
+                    }
+
                     // Get slot info once for logging and metrics
                     let slot_info_snapshot = slot_info_upstream.lock().await.clone();
 
                     if let Some((slot, name)) = &slot_info_snapshot {
                         log::debug!(
                             "[slot {} ({})] Forwarding {} ({:?}) commands to client (modified: {})",
-                            slot,
+                            slot.0,
                             name,
                             commands.len(),
                             CommandList(&commands),
@@ -425,21 +472,29 @@ where
         }
     }
 
+    client_registry_cleanup.deregister(client_id).await;
     Ok(())
 }
 
 async fn handle_client_messages(
     state: &mut ConnectionState,
     messages: &mut Vec<Value>,
-    slot_info: &Option<(u32, String)>,
+    slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
-    deathlink_exclusions: &HashSet<u32>,
+    deathlink_exclusions: &HashSet<SlotId>,
     datapackage_cache: &Arc<str>,
     inject_notext: bool,
-) -> Result<(bool, Option<ClientResponse>)> {
+) -> Result<(
+    bool,
+    Option<ClientResponse>,
+    Vec<Value>,
+    Option<HashSet<String>>,
+)> {
     let mut modified = false;
     let mut error = None;
     let mut response: Option<ClientResponse> = None;
+    let mut bounces_to_route: Vec<Value> = Vec::new();
+    let mut tag_update: Option<HashSet<String>> = None;
 
     messages.retain_mut(|message| {
         if error.is_some() {
@@ -467,6 +522,11 @@ async fn handle_client_messages(
                 modified = true;
                 false
             }
+            MessageDecision::DropAndRoute => {
+                bounces_to_route.push(message.clone());
+                modified = true;
+                false
+            }
             MessageDecision::DropWithResponse(value) => {
                 response = Some(ClientResponse::Values(vec![value]));
                 modified = true;
@@ -477,14 +537,21 @@ async fn handle_client_messages(
                 modified = true;
                 false
             }
-            MessageDecision::Forward => true,
-            MessageDecision::Modified => {
-                modified = true;
+            MessageDecision::Forward | MessageDecision::Modified => {
+                if get_cmd(message) == Some("ConnectUpdate") {
+                    if let Ok(update) = parse_as::<ConnectUpdate>(message) {
+                        tag_update = Some(update.tags.into_iter().collect());
+                    }
+                }
+                if matches!(decision, MessageDecision::Modified) {
+                    modified = true;
+                }
                 true
             }
-            MessageDecision::ForwardAndInject(_) | MessageDecision::SendConnectionRefused => {
+            MessageDecision::ForwardWithRegistration { .. }
+            | MessageDecision::SendConnectionRefused => {
                 unreachable!(
-                    "Client messages should never return ForwardAndInject or SendConnectionRefused"
+                    "Client messages should never return ForwardWithRegistration or SendConnectionRefused"
                 )
             }
         }
@@ -494,15 +561,15 @@ async fn handle_client_messages(
         return Err(e);
     }
 
-    Ok((modified, response))
+    Ok((modified, response, bounces_to_route, tag_update))
 }
 
 fn handle_client_message(
     state: &mut ConnectionState,
     cmd: &mut Value,
-    slot_info: &Option<(u32, String)>,
+    slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
-    deathlink_exclusions: &HashSet<u32>,
+    deathlink_exclusions: &HashSet<SlotId>,
     datapackage_cache: &Arc<str>,
     inject_notext: bool,
 ) -> Result<MessageDecision> {
@@ -521,22 +588,19 @@ fn handle_client_message(
         return Ok(MessageDecision::Forward);
     }
 
-    // Check for DeathLink - handle exclusion and signal emission
     if cmd_type == Some("Bounce") {
         if let Ok(bounced) = parse_as::<Bounced>(cmd) {
             if bounced.tags.contains(&"DeathLink".to_string()) {
                 if let Some((slot, name)) = slot_info {
-                    // Check exclusion first
                     if deathlink_exclusions.contains(slot) {
                         log::info!(
                             "Dropping outgoing DeathLink from excluded slot {} ({})",
-                            slot,
+                            slot.0,
                             name
                         );
                         return Ok(MessageDecision::Drop);
                     }
 
-                    // Not excluded - emit signal and allow forwarding
                     let source = bounced
                         .data
                         .get("source")
@@ -551,7 +615,7 @@ fn handle_client_message(
 
                     log::info!(
                         "DeathLink sent from slot {} ({}): source={}, cause={:?}",
-                        slot,
+                        slot.0,
                         name,
                         source,
                         cause
@@ -564,6 +628,7 @@ fn handle_client_message(
                 }
             }
         }
+        return Ok(MessageDecision::DropAndRoute);
     }
 
     if cmd_type == Some("Say") {
@@ -578,7 +643,7 @@ fn handle_client_message(
 
             if is_command(&say.text, "countdown") {
                 if let Some((slot, name)) = slot_info {
-                    log::info!("Intercepted !countdown from slot {} ({})", slot, name);
+                    log::info!("Intercepted !countdown from slot {} ({})", slot.0, name);
                     let _ = signal_sender.try_send(Signal::CountdownInit { slot: *slot });
                 } else {
                     log::warn!("Received !countdown but slot info not available yet");
@@ -620,6 +685,12 @@ fn handle_client_message(
                 .unwrap_or("")
                 .to_string();
 
+            let game = cmd
+                .get("game")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
             if let Some(obj) = cmd.as_object_mut() {
                 // Empty the password before forwarding to upstream
                 obj.insert(
@@ -640,7 +711,22 @@ fn handle_client_message(
                 }
             }
 
-            *state = ConnectionState::WaitingForConnected { password };
+            // Extract tags after NoText injection so they reflect actual state
+            let tags: Vec<String> = cmd
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            *state = ConnectionState::WaitingForConnected {
+                password,
+                tags,
+                game,
+            };
             Ok(MessageDecision::Modified)
         }
         ConnectionState::WaitingForConnected { .. } => {
@@ -672,9 +758,9 @@ fn handle_client_message(
 fn handle_upstream_messages(
     state: &mut ConnectionState,
     messages: &mut Vec<Value>,
-    login_info: &HashMap<u32, String>,
-    deathlink_exclusions: &HashSet<u32>,
-    slot_info: &Option<(u32, String)>,
+    login_info: &HashMap<SlotId, String>,
+    deathlink_exclusions: &HashSet<SlotId>,
+    slot_info: &Option<(SlotId, String)>,
     deathlink_probability: &DeathlinkProbability,
     inject_notext: bool,
 ) -> Result<UpstreamResult> {
@@ -682,6 +768,7 @@ fn handle_upstream_messages(
     let mut send_refused = false;
     let mut error = None;
     let mut inject_response = None;
+    let mut registration = None;
 
     messages.retain_mut(|message| {
         if send_refused || error.is_some() {
@@ -709,12 +796,22 @@ fn handle_upstream_messages(
                 modified = true;
                 false
             }
-            MessageDecision::DropWithResponse(_) | MessageDecision::DropWithRawResponse(_) => {
-                unreachable!("Upstream messages should never return DropWithResponse")
+            MessageDecision::DropWithResponse(_)
+            | MessageDecision::DropWithRawResponse(_)
+            | MessageDecision::DropAndRoute => {
+                unreachable!(
+                    "Upstream messages should never return DropWithResponse or DropAndRoute"
+                )
             }
             MessageDecision::Forward => true,
-            MessageDecision::ForwardAndInject(response) => {
-                inject_response = Some(response);
+            MessageDecision::ForwardWithRegistration {
+                registration: reg,
+                inject_response: resp,
+            } => {
+                registration = Some(reg);
+                if let Some(resp) = resp {
+                    inject_response = Some(resp);
+                }
                 true
             }
             MessageDecision::Modified => {
@@ -739,28 +836,32 @@ fn handle_upstream_messages(
     Ok(UpstreamResult::Continue {
         modified,
         inject_response,
+        registration,
     })
 }
 
 fn handle_upstream_message(
     state: &mut ConnectionState,
     cmd: &mut Value,
-    login_info: &HashMap<u32, String>,
-    deathlink_exclusions: &HashSet<u32>,
-    slot_info: &Option<(u32, String)>,
+    login_info: &HashMap<SlotId, String>,
+    deathlink_exclusions: &HashSet<SlotId>,
+    slot_info: &Option<(SlotId, String)>,
     deathlink_probability: &DeathlinkProbability,
     inject_notext: bool,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
 
     if cmd_type == Some("Bounced") {
+        log::warn!(
+            "Received unexpected Bounced from upstream (bounces should be handled by proxy)"
+        );
         if let Ok(bounced) = parse_as::<Bounced>(cmd) {
             if bounced.tags.contains(&"DeathLink".to_string()) {
                 if let Some((slot, name)) = slot_info {
                     if deathlink_exclusions.contains(slot) {
                         log::info!(
                             "Dropping incoming DeathLink for excluded slot {} ({})",
-                            slot,
+                            slot.0,
                             name
                         );
                         return Ok(MessageDecision::Drop);
@@ -772,7 +873,7 @@ fn handle_upstream_message(
                         if roll >= probability {
                             log::info!(
                                 "Dropping incoming DeathLink for slot {} ({}) due to probability filter ({:.1}% chance, rolled {:.3})",
-                                slot,
+                                slot.0,
                                 name,
                                 probability * 100.0,
                                 roll
@@ -845,7 +946,11 @@ fn handle_upstream_message(
             );
             Ok(MessageDecision::Drop)
         }
-        ConnectionState::WaitingForConnected { password } => {
+        ConnectionState::WaitingForConnected {
+            password,
+            tags,
+            game,
+        } => {
             let cmd_type = get_cmd(cmd);
 
             if cmd_type == Some("DataPackage") {
@@ -854,45 +959,56 @@ fn handle_upstream_message(
             }
 
             let password = password.clone();
+            let connect_tags = tags.clone();
+            let connect_game = game.clone();
 
             if cmd_type == Some("Connected") {
                 let connected = parse_as::<Connected>(cmd)?;
-                log::debug!("Intercepted Connected packet for slot {}", connected.slot);
+                log::debug!("Intercepted Connected packet for slot {}", connected.slot.0);
 
                 let expected_password = login_info.get(&connected.slot);
 
                 match expected_password {
                     Some(expected) if !expected.is_empty() => {
                         if password != *expected {
-                            log::warn!("Invalid password provided for slot {}", connected.slot);
+                            log::warn!("Invalid password provided for slot {}", connected.slot.0);
                             return Ok(MessageDecision::SendConnectionRefused);
                         }
                         log::info!(
                             "Password validated successfully for slot {} (notext: {})",
-                            connected.slot,
+                            connected.slot.0,
                             inject_notext
                         );
                     }
                     Some(_) | None => {
                         log::info!(
                             "No password required for slot {}, allowing connection (notext: {})",
-                            connected.slot,
+                            connected.slot.0,
                             inject_notext
                         );
                     }
                 }
 
+                let registration = RegistrationData {
+                    slot: connected.slot,
+                    team: connected.team,
+                    game: connect_game,
+                    tags: connect_tags,
+                };
+
                 *state = ConnectionState::LoggedIn;
-                if inject_notext {
+                let inject_response = if inject_notext {
                     let confirmation =
                         PrintJSON::with_color("Connected to APX proxy (NoText mode)", "green");
-                    return Ok(MessageDecision::ForwardAndInject(serde_json::to_value(
-                        confirmation,
-                    )?));
-                }
-                Ok(MessageDecision::Forward)
+                    Some(serde_json::to_value(confirmation)?)
+                } else {
+                    None
+                };
+                Ok(MessageDecision::ForwardWithRegistration {
+                    registration,
+                    inject_response,
+                })
             } else if cmd_type == Some("ConnectionRefused") {
-                // Connection was refused by upstream, just forward it
                 log::debug!("Connection refused by upstream");
                 Ok(MessageDecision::Forward)
             } else {

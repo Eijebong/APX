@@ -1,3 +1,4 @@
+use aprs_proto::primitives::SlotId;
 use rocket::{
     Request, State,
     request::{FromRequest, Outcome},
@@ -47,7 +48,7 @@ async fn refresh_passwords(
 
 #[derive(Serialize, Deserialize)]
 pub struct ExclusionListResponse {
-    excluded_slots: Vec<u32>,
+    excluded_slots: Vec<SlotId>,
 }
 
 #[rocket::get("/deathlink_exclusions")]
@@ -56,7 +57,7 @@ async fn get_deathlink_exclusions(
     state: &State<AppState>,
 ) -> Json<ExclusionListResponse> {
     let exclusions = state.deathlink_exclusions.read().await;
-    let mut excluded_slots: Vec<u32> = exclusions.iter().copied().collect();
+    let mut excluded_slots: Vec<SlotId> = exclusions.iter().copied().collect();
     excluded_slots.sort_unstable();
     Json(ExclusionListResponse { excluded_slots })
 }
@@ -65,8 +66,9 @@ async fn get_deathlink_exclusions(
 async fn add_deathlink_exclusion(
     _key: ApiKey,
     state: &State<AppState>,
-    slot: u32,
+    slot: i64,
 ) -> rocket::http::Status {
+    let slot = SlotId(slot);
     match crate::db::models::add_deathlink_exclusion(&state.db_pool, &state.config.room_id, slot)
         .await
     {
@@ -75,10 +77,10 @@ async fn add_deathlink_exclusion(
             exclusions.insert(slot);
 
             if newly_added {
-                log::info!("Added slot {} to deathlink exclusion list", slot);
+                log::info!("Added slot {} to deathlink exclusion list", slot.0);
                 rocket::http::Status::Created
             } else {
-                log::debug!("Slot {} was already in deathlink exclusion list", slot);
+                log::debug!("Slot {} was already in deathlink exclusion list", slot.0);
                 rocket::http::Status::Ok
             }
         }
@@ -93,8 +95,9 @@ async fn add_deathlink_exclusion(
 async fn remove_deathlink_exclusion(
     _key: ApiKey,
     state: &State<AppState>,
-    slot: u32,
+    slot: i64,
 ) -> rocket::http::Status {
+    let slot = SlotId(slot);
     match crate::db::models::remove_deathlink_exclusion(&state.db_pool, &state.config.room_id, slot)
         .await
     {
@@ -103,10 +106,10 @@ async fn remove_deathlink_exclusion(
             exclusions.remove(&slot);
 
             if was_present {
-                log::info!("Removed slot {} from deathlink exclusion list", slot);
+                log::info!("Removed slot {} from deathlink exclusion list", slot.0);
                 rocket::http::Status::Ok
             } else {
-                log::debug!("Slot {} was not in deathlink exclusion list", slot);
+                log::debug!("Slot {} was not in deathlink exclusion list", slot.0);
                 rocket::http::Status::NotFound
             }
         }

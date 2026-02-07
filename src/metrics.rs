@@ -1,3 +1,4 @@
+use aprs_proto::primitives::SlotId;
 use rocket_prometheus::prometheus::{IntCounterVec, opts};
 use std::sync::OnceLock;
 
@@ -14,10 +15,10 @@ pub fn init_metrics() -> IntCounterVec {
     counter
 }
 
-pub fn record_message(room_id: &str, slot: u32, message_type: &str, direction: &str) {
+pub fn record_message(room_id: &str, slot: SlotId, message_type: &str, direction: &str) {
     if let Some(counter) = MESSAGE_COUNTER.get() {
         counter
-            .with_label_values(&[room_id, &slot.to_string(), message_type, direction])
+            .with_label_values(&[room_id, &slot.0.to_string(), message_type, direction])
             .inc();
     }
 }

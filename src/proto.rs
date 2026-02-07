@@ -1,3 +1,4 @@
+use aprs_proto::primitives::{SlotId, TeamId};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::collections::HashMap;
@@ -104,8 +105,8 @@ pub struct SlotInfo {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Connected {
     pub cmd: String,
-    pub team: u32,
-    pub slot: u32,
+    pub team: TeamId,
+    pub slot: SlotId,
     pub players: Vec<NetworkPlayer>,
     pub missing_locations: Vec<i64>,
     pub checked_locations: Vec<i64>,
@@ -118,8 +119,8 @@ pub struct Connected {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct NetworkPlayer {
-    pub team: u32,
-    pub slot: u32,
+    pub team: TeamId,
+    pub slot: SlotId,
     pub alias: String,
     pub name: String,
 }
@@ -190,6 +191,10 @@ pub struct Bounced {
     pub cmd: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub games: Vec<String>,
+    #[serde(default)]
+    pub slots: Vec<SlotId>,
     pub data: serde_json::Value,
 }
 

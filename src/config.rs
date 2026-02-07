@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use aprs_proto::primitives::SlotId;
 use reqwest::Url;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -36,20 +37,20 @@ impl Config {
 
 pub struct AppState {
     pub config: Config,
-    pub passwords: Arc<RwLock<HashMap<u32, String>>>,
-    pub deathlink_exclusions: Arc<RwLock<HashSet<u32>>>,
+    pub passwords: Arc<RwLock<HashMap<SlotId, String>>>,
+    pub deathlink_exclusions: Arc<RwLock<HashSet<SlotId>>>,
     pub deathlink_probability: Arc<DeathlinkProbability>,
     pub db_pool: crate::db::DieselPool,
 }
 
 pub enum Signal {
     DeathLink {
-        slot: u32,
+        slot: SlotId,
         source: String,
         cause: Option<String>,
     },
     CountdownInit {
-        slot: u32,
+        slot: SlotId,
     },
 }
 

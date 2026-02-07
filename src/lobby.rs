@@ -1,10 +1,11 @@
 use anyhow::{Result, bail};
+use aprs_proto::primitives::SlotId;
 use std::collections::HashMap;
 
 use crate::config::Config;
 use crate::proto::SlotPasswordInfo;
 
-pub async fn refresh_login_info(config: &Config) -> Result<HashMap<u32, String>> {
+pub async fn refresh_login_info(config: &Config) -> Result<HashMap<SlotId, String>> {
     let url = config
         .lobby_root_url
         .join(&format!("/api/room/{}/slots_passwords", config.room_id))?;
@@ -40,7 +41,7 @@ pub async fn refresh_login_info(config: &Config) -> Result<HashMap<u32, String>>
                 slot_info.player_name
             );
         }
-        password_map.insert(slot_info.slot_number, password);
+        password_map.insert(SlotId(slot_info.slot_number as i64), password);
     }
 
     log::info!("Loaded passwords for {} slots", password_map.len());

@@ -16,6 +16,7 @@ mod lobby;
 mod metrics;
 mod proto;
 mod proxy;
+mod registry;
 mod tls;
 
 use config::{AppState, Config, DeathlinkProbability, Signal};
@@ -51,7 +52,7 @@ async fn main() -> Result<()> {
     .await
     {
         Ok(exclusions) => {
-            let set: HashSet<u32> = exclusions.into_iter().collect();
+            let set: HashSet<_> = exclusions.into_iter().collect();
             log::info!("Loaded {} deathlink exclusions from database", set.len());
             Arc::new(RwLock::new(set))
         }
@@ -158,6 +159,8 @@ async fn main() -> Result<()> {
     let (signal_sender, signal_receiver) = channel::<Signal>(1024);
     tokio::spawn(signal_handler(signal_receiver, db_pool, room_id.clone()));
 
+    let client_registry = Arc::new(registry::ClientRegistry::new());
+
     loop {
         let (socket, addr, inject_notext) = tokio::select! {
             result = listener.accept() => {
@@ -192,6 +195,7 @@ async fn main() -> Result<()> {
         let upstream_url = upstream_url.clone();
         let tls_acceptor = tls_acceptor.clone();
         let room_id = room_id.clone();
+        let client_registry = client_registry.clone();
 
         tokio::spawn(async move {
             if inject_notext {
@@ -225,6 +229,7 @@ async fn main() -> Result<()> {
                                 datapackage_cache,
                                 room_id,
                                 inject_notext,
+                                client_registry,
                             )
                             .await
                             {
@@ -250,6 +255,7 @@ async fn main() -> Result<()> {
                     datapackage_cache,
                     room_id,
                     inject_notext,
+                    client_registry,
                 )
                 .await
                 {

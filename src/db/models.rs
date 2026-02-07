@@ -1,3 +1,4 @@
+use aprs_proto::primitives::SlotId;
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
 use diesel_async::RunQueryDsl;
@@ -25,10 +26,10 @@ pub struct NewDeathLink {
 }
 
 impl NewDeathLink {
-    pub fn new(room_id: String, slot: u32, source: String, cause: Option<String>) -> Self {
+    pub fn new(room_id: String, slot: SlotId, source: String, cause: Option<String>) -> Self {
         Self {
             room_id,
-            slot: slot as i32,
+            slot: slot.0 as i32,
             source,
             cause,
         }
@@ -53,10 +54,10 @@ pub struct NewCountdown {
 }
 
 impl NewCountdown {
-    pub fn new(room_id: String, slot: u32) -> Self {
+    pub fn new(room_id: String, slot: SlotId) -> Self {
         Self {
             room_id,
-            slot: slot as i32,
+            slot: slot.0 as i32,
         }
     }
 }
@@ -146,7 +147,7 @@ pub struct NewDeathlinkExclusion {
 pub async fn get_room_deathlink_exclusions(
     pool: &crate::db::DieselPool,
     room_id: &str,
-) -> anyhow::Result<Vec<u32>> {
+) -> anyhow::Result<Vec<SlotId>> {
     use super::schema::deathlink_exclusions::dsl;
 
     let mut conn = pool.get().await?;
@@ -156,13 +157,16 @@ pub async fn get_room_deathlink_exclusions(
         .load(&mut conn)
         .await?;
 
-    Ok(exclusions.into_iter().map(|e| e.slot as u32).collect())
+    Ok(exclusions
+        .into_iter()
+        .map(|e| SlotId(e.slot as i64))
+        .collect())
 }
 
 pub async fn add_deathlink_exclusion(
     pool: &crate::db::DieselPool,
     room_id: &str,
-    slot: u32,
+    slot: SlotId,
 ) -> anyhow::Result<bool> {
     use super::schema::deathlink_exclusions::dsl;
 
@@ -170,7 +174,7 @@ pub async fn add_deathlink_exclusion(
 
     let new_exclusion = NewDeathlinkExclusion {
         room_id: room_id.to_string(),
-        slot: slot as i32,
+        slot: slot.0 as i32,
     };
 
     let result = diesel::insert_into(dsl::deathlink_exclusions)
@@ -185,7 +189,7 @@ pub async fn add_deathlink_exclusion(
 pub async fn remove_deathlink_exclusion(
     pool: &crate::db::DieselPool,
     room_id: &str,
-    slot: u32,
+    slot: SlotId,
 ) -> anyhow::Result<bool> {
     use super::schema::deathlink_exclusions::dsl;
 
@@ -194,7 +198,7 @@ pub async fn remove_deathlink_exclusion(
     let result = diesel::delete(
         dsl::deathlink_exclusions
             .filter(dsl::room_id.eq(room_id))
-            .filter(dsl::slot.eq(slot as i32)),
+            .filter(dsl::slot.eq(slot.0 as i32)),
     )
     .execute(&mut conn)
     .await?;
