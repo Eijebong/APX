@@ -91,6 +91,7 @@ impl ClientRegistry {
         bounce_value: &Value,
         deathlink_exclusions: &HashSet<SlotId>,
         deathlink_probability: &DeathlinkProbability,
+        room_id: &str,
     ) {
         let Ok(bounce) = serde_json::from_value::<Bounce>(bounce_value.clone()) else {
             log::warn!("Failed to parse Bounce message for routing");
@@ -129,9 +130,18 @@ impl ClientRegistry {
                 }
             }
 
-            let _ = client
+            if client
                 .sender
-                .try_send(ClientResponse::Values(vec![bounced.clone()]));
+                .try_send(ClientResponse::Values(vec![bounced.clone()]))
+                .is_ok()
+            {
+                crate::metrics::record_message(
+                    room_id,
+                    client.slot,
+                    "Bounced",
+                    "upstream_to_client",
+                );
+            }
         }
     }
 }

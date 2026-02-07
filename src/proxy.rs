@@ -180,7 +180,12 @@ where
                 }
             };
 
+            let slot_info_snapshot = slot_info_client.lock().await.clone();
+
             for bounce in &handler_result.bounces_to_route {
+                if let Some((slot, _)) = &slot_info_snapshot {
+                    metrics::record_message(&room_id_client, *slot, "Bounce", "client_to_upstream");
+                }
                 let exclusions = deathlink_exclusions_client.read().await;
                 client_registry_client
                     .route_bounce(
@@ -188,6 +193,7 @@ where
                         bounce,
                         &exclusions,
                         &deathlink_probability_client,
+                        &room_id_client,
                     )
                     .await;
             }
@@ -206,9 +212,6 @@ where
             if commands.is_empty() {
                 continue;
             }
-
-            // Get slot info once for logging and metrics
-            let slot_info_snapshot = slot_info_client.lock().await.clone();
 
             if let Some((slot, name)) = &slot_info_snapshot {
                 log::debug!(
