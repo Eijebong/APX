@@ -58,6 +58,14 @@ struct RegistrationData {
     tags: Vec<String>,
 }
 
+#[derive(Default)]
+struct ClientHandlerResult {
+    modified: bool,
+    response: Option<ClientResponse>,
+    bounces_to_route: Vec<Value>,
+    tag_update: Option<HashSet<String>>,
+}
+
 enum UpstreamResult {
     Continue {
         modified: bool,
@@ -149,7 +157,7 @@ where
                 break;
             };
 
-            let (modified, responses, bounces_to_route, tag_update) = {
+            let handler_result = {
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
                 let exclusions = deathlink_exclusions_client.read().await;
@@ -172,7 +180,7 @@ where
                 }
             };
 
-            for bounce in &bounces_to_route {
+            for bounce in &handler_result.bounces_to_route {
                 let exclusions = deathlink_exclusions_client.read().await;
                 client_registry_client
                     .route_bounce(
@@ -184,11 +192,11 @@ where
                     .await;
             }
 
-            if let Some(tags) = tag_update {
+            if let Some(tags) = handler_result.tag_update {
                 client_registry_client.update_tags(client_id, tags).await;
             }
 
-            if let Some(response) = responses {
+            if let Some(response) = handler_result.response {
                 if response_tx.send(response).await.is_err() {
                     break;
                 }
@@ -209,7 +217,7 @@ where
                     name,
                     commands.len(),
                     CommandList(&commands),
-                    modified
+                    handler_result.modified
                 );
 
                 // Record metrics for each command
@@ -228,11 +236,11 @@ where
                     "Forwarding {} ({:?}) commands to upstream (modified: {})",
                     commands.len(),
                     CommandList(&commands),
-                    modified
+                    handler_result.modified
                 );
             }
 
-            let msg_to_send = if modified {
+            let msg_to_send = if handler_result.modified {
                 let Ok(serialized) = serde_json::to_string(&commands) else {
                     log::error!("Error while reserializing commands");
                     break;
@@ -484,17 +492,9 @@ async fn handle_client_messages(
     deathlink_exclusions: &HashSet<SlotId>,
     datapackage_cache: &Arc<str>,
     inject_notext: bool,
-) -> Result<(
-    bool,
-    Option<ClientResponse>,
-    Vec<Value>,
-    Option<HashSet<String>>,
-)> {
-    let mut modified = false;
+) -> Result<ClientHandlerResult> {
+    let mut result = ClientHandlerResult::default();
     let mut error = None;
-    let mut response: Option<ClientResponse> = None;
-    let mut bounces_to_route: Vec<Value> = Vec::new();
-    let mut tag_update: Option<HashSet<String>> = None;
 
     messages.retain_mut(|message| {
         if error.is_some() {
@@ -519,32 +519,32 @@ async fn handle_client_messages(
 
         match decision {
             MessageDecision::Drop => {
-                modified = true;
+                result.modified = true;
                 false
             }
             MessageDecision::DropAndRoute => {
-                bounces_to_route.push(message.clone());
-                modified = true;
+                result.bounces_to_route.push(message.clone());
+                result.modified = true;
                 false
             }
             MessageDecision::DropWithResponse(value) => {
-                response = Some(ClientResponse::Values(vec![value]));
-                modified = true;
+                result.response = Some(ClientResponse::Values(vec![value]));
+                result.modified = true;
                 false
             }
             MessageDecision::DropWithRawResponse(raw) => {
-                response = Some(ClientResponse::Raw(raw));
-                modified = true;
+                result.response = Some(ClientResponse::Raw(raw));
+                result.modified = true;
                 false
             }
             MessageDecision::Forward | MessageDecision::Modified => {
                 if get_cmd(message) == Some("ConnectUpdate") {
                     if let Ok(update) = parse_as::<ConnectUpdate>(message) {
-                        tag_update = Some(update.tags.into_iter().collect());
+                        result.tag_update = Some(update.tags.into_iter().collect());
                     }
                 }
                 if matches!(decision, MessageDecision::Modified) {
-                    modified = true;
+                    result.modified = true;
                 }
                 true
             }
@@ -561,7 +561,7 @@ async fn handle_client_messages(
         return Err(e);
     }
 
-    Ok((modified, response, bounces_to_route, tag_update))
+    Ok(result)
 }
 
 fn handle_client_message(
