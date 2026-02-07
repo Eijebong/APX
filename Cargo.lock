@@ -252,7 +252,7 @@ checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 [[package]]
 name = "aprs-proto"
 version = "0.1.0"
-source = "git+https://github.com/panicbit/aprs.git#606142ed8daea11e1e666d27f6df187c8c3a9733"
+source = "git+https://github.com/panicbit/aprs.git#bc2e3f30b0531e67cc276ba79057628fbfa3d006"
 dependencies = [
  "aprs-value",
  "bitflags",
@@ -270,7 +270,7 @@ dependencies = [
 [[package]]
 name = "aprs-server-core"
 version = "0.1.0"
-source = "git+https://github.com/panicbit/aprs.git#606142ed8daea11e1e666d27f6df187c8c3a9733"
+source = "git+https://github.com/panicbit/aprs.git#bc2e3f30b0531e67cc276ba79057628fbfa3d006"
 dependencies = [
  "aprs-proto",
  "aprs-value",
@@ -283,7 +283,7 @@ dependencies = [
 [[package]]
 name = "aprs-value"
 version = "0.1.0"
-source = "git+https://github.com/panicbit/aprs.git#606142ed8daea11e1e666d27f6df187c8c3a9733"
+source = "git+https://github.com/panicbit/aprs.git#bc2e3f30b0531e67cc276ba79057628fbfa3d006"
 dependencies = [
  "eyre",
  "fnv",
