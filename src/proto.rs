@@ -210,6 +210,8 @@ pub struct GetDataPackage {
     pub cmd: String,
     #[serde(default)]
     pub games: Vec<String>,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

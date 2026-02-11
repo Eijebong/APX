@@ -23,7 +23,77 @@ use config::{AppState, Config, DeathlinkProbability, Signal};
 use futures_util::{SinkExt, StreamExt};
 use lobby::refresh_login_info;
 use proxy::handle_client;
+use std::collections::HashMap;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+pub struct DataPackageCache {
+    full_response: Arc<str>,
+    game_fragments: HashMap<String, std::ops::Range<usize>>,
+}
+
+const DATAPACKAGE_PREFIX: &str = r#"[{"cmd":"DataPackage","data":{"games":{"#;
+const DATAPACKAGE_SUFFIX: &str = "}}}]";
+
+impl DataPackageCache {
+    fn from_response(cmd: serde_json::Value) -> anyhow::Result<Self> {
+        let games_obj = cmd
+            .get("data")
+            .and_then(|d| d.get("games"))
+            .and_then(|g| g.as_object())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut buf = String::from(DATAPACKAGE_PREFIX);
+        let mut game_fragments = HashMap::new();
+
+        for (i, (name, data)) in games_obj.iter().enumerate() {
+            if i > 0 {
+                buf.push(',');
+            }
+            let start = buf.len();
+            buf.push_str(&serde_json::to_string(name).unwrap());
+            buf.push(':');
+            buf.push_str(&serde_json::to_string(data).unwrap());
+            game_fragments.insert(name.clone(), start..buf.len());
+        }
+
+        buf.push_str(DATAPACKAGE_SUFFIX);
+        let full_response: Arc<str> = buf.into();
+
+        Ok(Self {
+            full_response,
+            game_fragments,
+        })
+    }
+
+    pub fn full_response(&self) -> &Arc<str> {
+        &self.full_response
+    }
+
+    pub fn response_for_games(&self, requested: &[String]) -> Arc<str> {
+        self.build_response(|name| requested.contains(name))
+    }
+
+    pub fn response_excluding_games(&self, exclusions: &[String]) -> Arc<str> {
+        self.build_response(|name| !exclusions.contains(name))
+    }
+
+    fn build_response(&self, filter: impl Fn(&String) -> bool) -> Arc<str> {
+        let mut response = String::from(DATAPACKAGE_PREFIX);
+        let mut first = true;
+        for (name, range) in &self.game_fragments {
+            if filter(name) {
+                if !first {
+                    response.push(',');
+                }
+                response.push_str(&self.full_response[range.clone()]);
+                first = false;
+            }
+        }
+        response.push_str(DATAPACKAGE_SUFFIX);
+        response.into()
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -89,12 +159,13 @@ async fn main() -> Result<()> {
 
     let upstream_url = format!("ws://{}", config.ap_server);
 
-    let datapackage = fetch_datapackage(&upstream_url).await?;
+    let datapackage_cache = fetch_datapackage(&upstream_url).await?;
     log::info!(
-        "Cached DataPackage at startup ({} bytes)",
-        datapackage.len()
+        "Cached DataPackage at startup ({} bytes, {} games)",
+        datapackage_cache.full_response().len(),
+        datapackage_cache.game_fragments.len(),
     );
-    let datapackage_cache: Arc<str> = datapackage.into();
+    let datapackage_cache = Arc::new(datapackage_cache);
     let room_id = config.room_id.clone();
 
     let app_state = AppState {
@@ -294,7 +365,7 @@ async fn signal_handler(mut receiver: Receiver<Signal>, db_pool: db::DieselPool,
     log::warn!("Signal channel has been closed")
 }
 
-async fn fetch_datapackage(upstream_url: &str) -> Result<String> {
+async fn fetch_datapackage(upstream_url: &str) -> Result<DataPackageCache> {
     let (ws, _) = connect_async(upstream_url).await?;
     let (mut write, mut read) = ws.split();
 
@@ -319,7 +390,7 @@ async fn fetch_datapackage(upstream_url: &str) -> Result<String> {
             let commands: Vec<serde_json::Value> = serde_json::from_str(&text)?;
             for cmd in commands {
                 if cmd.get("cmd").and_then(|v| v.as_str()) == Some("DataPackage") {
-                    return Ok(serde_json::to_string(&[cmd])?);
+                    return DataPackageCache::from_response(cmd);
                 }
             }
         }

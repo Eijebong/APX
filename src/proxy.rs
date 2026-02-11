@@ -17,6 +17,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
 use aprs_proto::primitives::SlotId;
 
+use crate::DataPackageCache;
 use crate::config::{DeathlinkProbability, Signal};
 use crate::metrics;
 use crate::proto::{Bounced, ConnectUpdate, Connected, GetDataPackage, PrintJSON, RoomInfo, Say};
@@ -82,7 +83,7 @@ pub async fn handle_client<S>(
     passwords: Arc<RwLock<HashMap<SlotId, String>>>,
     deathlink_exclusions: Arc<RwLock<HashSet<SlotId>>>,
     deathlink_probability: Arc<DeathlinkProbability>,
-    datapackage_cache: Arc<str>,
+    datapackage_cache: Arc<DataPackageCache>,
     room_id: String,
     inject_notext: bool,
     client_registry: Arc<ClientRegistry>,
@@ -493,7 +494,7 @@ async fn handle_client_messages(
     slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<SlotId>,
-    datapackage_cache: &Arc<str>,
+    datapackage_cache: &Arc<DataPackageCache>,
     inject_notext: bool,
 ) -> Result<ClientHandlerResult> {
     let mut result = ClientHandlerResult::default();
@@ -573,21 +574,37 @@ fn handle_client_message(
     slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<SlotId>,
-    datapackage_cache: &Arc<str>,
+    datapackage_cache: &Arc<DataPackageCache>,
     inject_notext: bool,
 ) -> Result<MessageDecision> {
     let cmd_type = get_cmd(cmd);
 
     if cmd_type == Some("GetDataPackage") {
         if let Ok(request) = parse_as::<GetDataPackage>(cmd) {
-            if request.games.is_empty() {
-                log::info!("Serving DataPackage from cache");
-                return Ok(MessageDecision::DropWithRawResponse(Arc::clone(
-                    datapackage_cache,
-                )));
+            if !request.games.is_empty() {
+                log::debug!(
+                    "Serving DataPackage from cache for games: {:?}",
+                    request.games
+                );
+                return Ok(MessageDecision::DropWithRawResponse(
+                    datapackage_cache.response_for_games(&request.games),
+                ));
             }
+            if !request.exclusions.is_empty() {
+                log::debug!(
+                    "Serving DataPackage from cache excluding: {:?}",
+                    request.exclusions
+                );
+                return Ok(MessageDecision::DropWithRawResponse(
+                    datapackage_cache.response_excluding_games(&request.exclusions),
+                ));
+            }
+            log::debug!("Serving full DataPackage from cache");
+            return Ok(MessageDecision::DropWithRawResponse(Arc::clone(
+                datapackage_cache.full_response(),
+            )));
         }
-        // Specific games requested, forward to upstream
+        log::warn!("Unreadable datapackage request, forwarding to upstream");
         return Ok(MessageDecision::Forward);
     }
 
@@ -667,11 +684,6 @@ fn handle_client_message(
             bail!("Received message from client while waiting for RoomInfo. This is a client bug.")
         }
         ConnectionState::WaitingForConnect => {
-            if cmd_type == Some("GetDataPackage") {
-                log::debug!("Received data package request, letting it through");
-                return Ok(MessageDecision::Forward);
-            }
-
             if cmd_type != Some("Connect") {
                 log::debug!(
                     "Received non Connect ({:?}) client message while waiting for connect, dropping it.",
@@ -733,14 +745,11 @@ fn handle_client_message(
             Ok(MessageDecision::Modified)
         }
         ConnectionState::WaitingForConnected { .. } => {
-            if cmd_type != Some("GetDataPackage") {
-                log::debug!(
-                    "Dropping client message {:?} while waiting for authentication",
-                    cmd_type
-                );
-                return Ok(MessageDecision::Drop);
-            }
-            Ok(MessageDecision::Forward)
+            log::debug!(
+                "Dropping client message {:?} while waiting for authentication",
+                cmd_type
+            );
+            Ok(MessageDecision::Drop)
         }
         ConnectionState::LoggedIn => {
             if inject_notext && cmd_type == Some("ConnectUpdate") {
@@ -937,12 +946,6 @@ fn handle_upstream_message(
             Ok(MessageDecision::Modified)
         }
         ConnectionState::WaitingForConnect => {
-            if cmd_type == Some("DataPackage") {
-                log::debug!("Allowing DataPackage response through while waiting for Connect");
-                return Ok(MessageDecision::Forward);
-            }
-
-            // Drop any other messages - they might be responses to a previous failed auth attempt
             log::debug!(
                 "Dropping upstream message {:?} while waiting for Connect",
                 cmd_type
@@ -955,12 +958,6 @@ fn handle_upstream_message(
             game,
         } => {
             let cmd_type = get_cmd(cmd);
-
-            if cmd_type == Some("DataPackage") {
-                log::debug!("Allowing DataPackage response through while waiting for Connected");
-                return Ok(MessageDecision::Forward);
-            }
-
             let password = password.clone();
             let connect_tags = tags.clone();
             let connect_game = game.clone();
