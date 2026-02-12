@@ -609,7 +609,7 @@ fn handle_client_message(
 
     if cmd_type == Some("Bounce") {
         if let Ok(bounced) = parse_as::<Bounced>(cmd) {
-            if bounced.tags.contains(&"DeathLink".to_string()) {
+            if bounced.tags.iter().any(|t| t == "DeathLink") {
                 if let Some((slot, name)) = slot_info {
                     if deathlink_exclusions.contains(slot) {
                         log::info!(
@@ -717,8 +717,8 @@ fn handle_client_message(
                         .entry("tags")
                         .or_insert_with(|| serde_json::Value::Array(vec![]));
                     if let Some(tags_array) = tags.as_array_mut() {
-                        if !tags_array.contains(&serde_json::Value::String("NoText".to_string())) {
-                            tags_array.push(serde_json::Value::String("NoText".to_string()));
+                        if !tags_array.iter().any(|v| v.as_str() == Some("NoText")) {
+                            tags_array.push(serde_json::Value::String("NoText".into()));
                         }
                         log::debug!("Injected NoText tag into Connect");
                     }
@@ -753,7 +753,7 @@ fn handle_client_message(
         ConnectionState::LoggedIn => {
             if inject_notext && cmd_type == Some("ConnectUpdate") {
                 if let Ok(mut update) = parse_as::<ConnectUpdate>(cmd) {
-                    if !update.tags.contains(&"NoText".to_string()) {
+                    if !update.tags.iter().any(|t| t == "NoText") {
                         log::debug!("Injecting NoText tag into ConnectUpdate");
                         update.tags.push("NoText".to_string());
                         *cmd = serde_json::to_value(update)?;
@@ -867,7 +867,7 @@ fn handle_upstream_message(
             "Received unexpected Bounced from upstream (bounces should be handled by proxy)"
         );
         if let Ok(bounced) = parse_as::<Bounced>(cmd) {
-            if bounced.tags.contains(&"DeathLink".to_string()) {
+            if bounced.tags.iter().any(|t| t == "DeathLink") {
                 if let Some((slot, name)) = slot_info {
                     if deathlink_exclusions.contains(slot) {
                         log::info!(
@@ -902,7 +902,7 @@ fn handle_upstream_message(
     if cmd_type == Some("PrintJSON") {
         if let Ok(print_json) = parse_as::<PrintJSON>(cmd) {
             match print_json.type_.as_deref() {
-                Some("Join") if print_json.tags.contains(&"Admin".to_string()) => {
+                Some("Join") if print_json.tags.iter().any(|t| t == "Admin") => {
                     log::debug!("Hiding Admin client join message");
                     return Ok(MessageDecision::Drop);
                 }

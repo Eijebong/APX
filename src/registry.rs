@@ -98,7 +98,7 @@ impl ClientRegistry {
             return;
         };
 
-        let is_deathlink = bounce.tags.contains(&"DeathLink".to_string());
+        let is_deathlink = bounce.tags.iter().any(|t| t == "DeathLink");
 
         // Build bounced message from raw JSON to preserve data exactly
         let mut bounced = bounce_value.clone();
