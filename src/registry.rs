@@ -106,6 +106,12 @@ impl ClientRegistry {
             obj.insert("cmd".into(), Value::String("Bounced".into()));
         }
 
+        let Ok(serialized) = serde_json::to_string(&[&bounced]) else {
+            log::warn!("Failed to serialize Bounced message for routing");
+            return;
+        };
+        let serialized: Arc<str> = serialized.into();
+
         let clients = self.clients.read().await;
         let Some(sender) = clients.get(&sender_id) else {
             return;
@@ -132,7 +138,7 @@ impl ClientRegistry {
 
             if client
                 .sender
-                .try_send(ClientResponse::Values(vec![bounced.clone()]))
+                .try_send(ClientResponse::Raw(Arc::clone(&serialized)))
                 .is_ok()
             {
                 crate::metrics::record_message(
