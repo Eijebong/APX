@@ -158,7 +158,7 @@ where
                 break;
             };
 
-            let handler_result = {
+            let (handler_result, slot_info_snapshot, exclusions_snapshot) = {
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
                 let exclusions = deathlink_exclusions_client.read().await;
@@ -173,7 +173,11 @@ where
                 )
                 .await
                 {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        let si = slot_info.clone();
+                        let excl = exclusions.clone();
+                        (result, si, excl)
+                    }
                     Err(e) => {
                         log::error!("Error while handling message from client: {}", e);
                         break;
@@ -181,18 +185,15 @@ where
                 }
             };
 
-            let slot_info_snapshot = slot_info_client.lock().await.clone();
-
             for bounce in &handler_result.bounces_to_route {
                 if let Some((slot, _)) = &slot_info_snapshot {
                     metrics::record_message(&room_id_client, *slot, "Bounce", "client_to_upstream");
                 }
-                let exclusions = deathlink_exclusions_client.read().await;
                 client_registry_client
                     .route_bounce(
                         client_id,
                         bounce,
-                        &exclusions,
+                        &exclusions_snapshot,
                         &deathlink_probability_client,
                         &room_id_client,
                     )
@@ -326,12 +327,12 @@ where
                         }
                     }
 
-                    let result = {
+                    let (result, slot_info_snapshot) = {
                         let mut state = state_upstream.lock().await;
                         let passwords_read = passwords_upstream.read().await;
                         let exclusions = deathlink_exclusions_upstream.read().await;
                         let slot_info_read = slot_info_upstream.lock().await;
-                        match handle_upstream_messages(
+                        let r = match handle_upstream_messages(
                             &mut state,
                             &mut commands,
                             &passwords_read,
@@ -345,7 +346,8 @@ where
                                 log::error!("Error while validating upstream message: {}", e);
                                 break;
                             }
-                        }
+                        };
+                        (r, slot_info_read.clone())
                     };
 
                     let (mut modified, inject_response, registration) = match result {
@@ -386,9 +388,6 @@ where
                             },
                         ).await;
                     }
-
-                    // Get slot info once for logging and metrics
-                    let slot_info_snapshot = slot_info_upstream.lock().await.clone();
 
                     if let Some((slot, name)) = &slot_info_snapshot {
                         log::debug!(
