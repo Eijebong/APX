@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aprs_proto::client::Bounce;
+use serde::Deserialize;
 use aprs_proto::primitives::{SlotId, TeamId};
 use aprs_server_core::bounce_matches;
 use aprs_server_core::traits::{GetGame, GetSlotId, GetTeamId, HasTag};
@@ -93,7 +94,7 @@ impl ClientRegistry {
         deathlink_probability: &DeathlinkProbability,
         room_id: &str,
     ) {
-        let Ok(bounce) = serde_json::from_value::<Bounce>(bounce_value.clone()) else {
+        let Ok(bounce) = Bounce::deserialize(bounce_value) else {
             log::warn!("Failed to parse Bounce message for routing");
             return;
         };
