@@ -1037,7 +1037,7 @@ impl<'a> std::fmt::Debug for CommandList<'a> {
 }
 
 fn parse_as<T: serde::de::DeserializeOwned>(value: &serde_json::Value) -> Result<T> {
-    serde_json::from_value(value.clone()).map_err(Into::into)
+    T::deserialize(value).map_err(Into::into)
 }
 
 fn parse_message(text: &str) -> Result<Vec<serde_json::Value>> {
