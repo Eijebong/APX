@@ -820,6 +820,7 @@ fn handle_upstream_messages(
                 inject_response: resp,
             } => {
                 registration = Some(reg);
+                modified = true;
                 if let Some(resp) = resp {
                     inject_response = Some(resp);
                 }
@@ -996,6 +997,17 @@ fn handle_upstream_message(
                 };
 
                 *state = ConnectionState::LoggedIn;
+
+                // XXX: This is a workaround for AhiT because of a client bug.
+                // Reorder keys so "slot" appears before "players" in the JSON.
+                // The upstream server (orjson) sorts keys alphabetically, putting
+                // "players" before "slot". The AHIT game client uses a string-based
+                // ReplOnce to find the first "slot" in the JSON, which would
+                // incorrectly match the "slot" inside a player entry rather than
+                // the top-level one. By moving "slot" to the front, we ensure the
+                // client receives JSON where the top-level "slot" comes first.
+                reorder_slot_first(cmd);
+
                 let inject_response = if inject_notext {
                     let confirmation =
                         PrintJSON::with_color("Connected to APX proxy (NoText mode)", "green");
@@ -1019,6 +1031,16 @@ fn handle_upstream_message(
         }
         ConnectionState::LoggedIn => Ok(MessageDecision::Forward),
     }
+}
+
+fn reorder_slot_first(cmd: &mut Value) {
+    let Value::Object(obj) = cmd else { return };
+    let Some(slot_val) = obj.shift_remove("slot") else {
+        return;
+    };
+    let rest = std::mem::take(obj);
+    obj.insert("slot".to_string(), slot_val);
+    obj.extend(rest);
 }
 
 fn get_cmd(value: &serde_json::Value) -> Option<&str> {
