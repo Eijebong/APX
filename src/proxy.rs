@@ -62,7 +62,7 @@ struct RegistrationData {
 #[derive(Default)]
 struct ClientHandlerResult {
     modified: bool,
-    response: Option<ClientResponse>,
+    responses: Vec<ClientResponse>,
     bounces_to_route: Vec<Value>,
     tag_update: Option<HashSet<String>>,
 }
@@ -204,7 +204,7 @@ where
                 client_registry_client.update_tags(client_id, tags).await;
             }
 
-            if let Some(response) = handler_result.response {
+            for response in handler_result.responses {
                 if response_tx.send(response).await.is_err() {
                     break;
                 }
@@ -531,12 +531,12 @@ async fn handle_client_messages(
                 false
             }
             MessageDecision::DropWithResponse(value) => {
-                result.response = Some(ClientResponse::Values(vec![value]));
+                result.responses.push(ClientResponse::Values(vec![value]));
                 result.modified = true;
                 false
             }
             MessageDecision::DropWithRawResponse(raw) => {
-                result.response = Some(ClientResponse::Raw(raw));
+                result.responses.push(ClientResponse::Raw(raw));
                 result.modified = true;
                 false
             }
