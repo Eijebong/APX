@@ -95,8 +95,9 @@ where
     let slot_info = Arc::new(Mutex::new(None::<(SlotId, String)>));
     let mut config = WebSocketConfig::default();
     config.extensions.permessage_deflate = Some(DeflateConfig::default());
-
     let client_ws = accept_async_with_config(socket, Some(config)).await?;
+
+    let config = WebSocketConfig::default();
     let (upstream_ws, _) = connect_async_with_config(upstream_url, Some(config), false).await?;
 
     let (mut upstream_write, mut upstream_read) = upstream_ws.split();
