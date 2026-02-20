@@ -428,8 +428,10 @@ where
                             log::error!("Error while reserializing commands");
                             break;
                         };
+                        drop(commands);
                         Message::Text(serialized.into())
                     } else {
+                        drop(commands);
                         Message::Text(text)
                     };
 
