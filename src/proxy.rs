@@ -38,6 +38,12 @@ pub enum ConnectionState {
     LoggedIn,
 }
 
+enum PendingDataPackageRequest {
+    Games(Vec<String>),
+    Exclusions(Vec<String>),
+    All,
+}
+
 enum MessageDecision {
     Forward,
     ForwardWithRegistration {
@@ -49,6 +55,7 @@ enum MessageDecision {
     DropAndRoute,
     DropWithResponse(Value),
     DropWithRawResponse(Arc<str>),
+    DeferDataPackage(PendingDataPackageRequest),
     SendConnectionRefused,
 }
 
@@ -65,6 +72,7 @@ struct ClientHandlerResult {
     responses: Vec<ClientResponse>,
     bounces_to_route: Vec<Value>,
     tag_update: Option<HashSet<String>>,
+    pending_dp_request: Option<PendingDataPackageRequest>,
 }
 
 enum UpstreamResult {
@@ -108,6 +116,9 @@ where
     let response_tx_for_registry = response_tx.clone();
     let client_id = ClientRegistry::allocate_id();
 
+    let pending_dp_request: Arc<Mutex<Option<PendingDataPackageRequest>>> =
+        Arc::new(Mutex::new(None));
+
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
     let signal_sender_client = signal_sender.clone();
@@ -116,6 +127,7 @@ where
     let datapackage_cache_client = datapackage_cache.clone();
     let room_id_client = room_id.clone();
     let client_registry_client = client_registry.clone();
+    let pending_dp_request_client = pending_dp_request.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -159,7 +171,7 @@ where
                 break;
             };
 
-            let (handler_result, slot_info_snapshot, exclusions_snapshot) = {
+            let (mut handler_result, slot_info_snapshot, exclusions_snapshot) = {
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
                 let exclusions = deathlink_exclusions_client.read().await;
@@ -185,6 +197,11 @@ where
                     }
                 }
             };
+
+            if handler_result.pending_dp_request.is_some() {
+                let mut pending = pending_dp_request_client.lock().await;
+                *pending = handler_result.pending_dp_request.take();
+            }
 
             for bounce in &handler_result.bounces_to_route {
                 if let Some((slot, _)) = &slot_info_snapshot {
@@ -270,6 +287,8 @@ where
     let room_id_upstream = room_id.clone();
     let inject_notext_upstream = inject_notext;
     let client_registry_cleanup = client_registry.clone();
+    let datapackage_cache_upstream = datapackage_cache.clone();
+    let pending_dp_request_upstream = pending_dp_request.clone();
     let upstream_to_client = async move {
         loop {
             tokio::select! {
@@ -377,6 +396,7 @@ where
                         modified = true;
                     }
 
+                    let just_connected = registration.is_some();
                     if let Some(reg) = registration {
                         client_registry.register(
                             client_id,
@@ -438,6 +458,29 @@ where
 
                     if client_write.send(msg_to_send).await.is_err() {
                         break;
+                    }
+
+                    if just_connected {
+                        let pending = pending_dp_request_upstream.lock().await.take();
+                        if let Some(req) = pending {
+                            let response = match req {
+                                PendingDataPackageRequest::Games(games) => {
+                                    log::debug!("Sending deferred DataPackage for games: {:?}", games);
+                                    datapackage_cache_upstream.response_for_games(&games)
+                                }
+                                PendingDataPackageRequest::Exclusions(exclusions) => {
+                                    log::debug!("Sending deferred DataPackage excluding: {:?}", exclusions);
+                                    datapackage_cache_upstream.response_excluding_games(&exclusions)
+                                }
+                                PendingDataPackageRequest::All => {
+                                    log::debug!("Sending deferred full DataPackage");
+                                    Arc::clone(datapackage_cache_upstream.full_response())
+                                }
+                            };
+                            if client_write.send(Message::Text((*response).into())).await.is_err() {
+                                break;
+                            }
+                        }
                     }
                 }
                 Some(response) = response_rx.recv() => {
@@ -543,6 +586,11 @@ async fn handle_client_messages(
                 result.modified = true;
                 false
             }
+            MessageDecision::DeferDataPackage(req) => {
+                result.pending_dp_request = Some(req);
+                result.modified = true;
+                false
+            }
             MessageDecision::Forward | MessageDecision::Modified => {
                 if get_cmd(message) == Some("ConnectUpdate") {
                     if let Ok(update) = parse_as::<ConnectUpdate>(message) {
@@ -583,6 +631,27 @@ fn handle_client_message(
 
     if cmd_type == Some("GetDataPackage") {
         if let Ok(request) = parse_as::<GetDataPackage>(cmd) {
+            let is_logged_in = matches!(state, ConnectionState::LoggedIn);
+            if !is_logged_in {
+                let pending = if !request.games.is_empty() {
+                    log::debug!(
+                        "Deferring DataPackage for games {:?} until after Connected",
+                        request.games
+                    );
+                    PendingDataPackageRequest::Games(request.games)
+                } else if !request.exclusions.is_empty() {
+                    log::debug!(
+                        "Deferring DataPackage (excluding {:?}) until after Connected",
+                        request.exclusions
+                    );
+                    PendingDataPackageRequest::Exclusions(request.exclusions)
+                } else {
+                    log::debug!("Deferring full DataPackage until after Connected");
+                    PendingDataPackageRequest::All
+                };
+                return Ok(MessageDecision::DeferDataPackage(pending));
+            }
+
             if !request.games.is_empty() {
                 log::debug!(
                     "Serving DataPackage from cache for games: {:?}",
@@ -812,9 +881,10 @@ fn handle_upstream_messages(
             }
             MessageDecision::DropWithResponse(_)
             | MessageDecision::DropWithRawResponse(_)
-            | MessageDecision::DropAndRoute => {
+            | MessageDecision::DropAndRoute
+            | MessageDecision::DeferDataPackage(_) => {
                 unreachable!(
-                    "Upstream messages should never return DropWithResponse or DropAndRoute"
+                    "Upstream messages should never return DropWithResponse, DropAndRoute, or DeferDataPackage"
                 )
             }
             MessageDecision::Forward => true,
