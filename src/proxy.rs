@@ -26,6 +26,9 @@ use crate::registry::{ClientEntry, ClientRegistry, ClientResponse};
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
 const MAX_SAY_LENGTH: usize = 2000;
 
+// Games whose clients need DataPackage responses deferred until after Connected
+const DEFER_DATAPACKAGE_GAMES: &[&str] = &["A Hat in Time", "Hollow Knight", "Outer Wilds"];
+
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
     WaitingForRoomInfo,
@@ -72,7 +75,7 @@ struct ClientHandlerResult {
     responses: Vec<ClientResponse>,
     bounces_to_route: Vec<Value>,
     tag_update: Option<HashSet<String>>,
-    pending_dp_request: Option<PendingDataPackageRequest>,
+    pending_dp_requests: Vec<PendingDataPackageRequest>,
 }
 
 enum UpstreamResult {
@@ -116,8 +119,8 @@ where
     let response_tx_for_registry = response_tx.clone();
     let client_id = ClientRegistry::allocate_id();
 
-    let pending_dp_request: Arc<Mutex<Option<PendingDataPackageRequest>>> =
-        Arc::new(Mutex::new(None));
+    let pending_dp_requests: Arc<Mutex<Vec<PendingDataPackageRequest>>> =
+        Arc::new(Mutex::new(Vec::new()));
 
     let state_client = state.clone();
     let slot_info_client = slot_info.clone();
@@ -127,7 +130,7 @@ where
     let datapackage_cache_client = datapackage_cache.clone();
     let room_id_client = room_id.clone();
     let client_registry_client = client_registry.clone();
-    let pending_dp_request_client = pending_dp_request.clone();
+    let pending_dp_requests_client = pending_dp_requests.clone();
     let client_to_upstream = async move {
         while let Some(msg) = client_read.next().await {
             let msg = match msg {
@@ -198,9 +201,9 @@ where
                 }
             };
 
-            if handler_result.pending_dp_request.is_some() {
-                let mut pending = pending_dp_request_client.lock().await;
-                *pending = handler_result.pending_dp_request.take();
+            if !handler_result.pending_dp_requests.is_empty() {
+                let mut pending = pending_dp_requests_client.lock().await;
+                pending.append(&mut handler_result.pending_dp_requests);
             }
 
             for bounce in &handler_result.bounces_to_route {
@@ -288,7 +291,7 @@ where
     let inject_notext_upstream = inject_notext;
     let client_registry_cleanup = client_registry.clone();
     let datapackage_cache_upstream = datapackage_cache.clone();
-    let pending_dp_request_upstream = pending_dp_request.clone();
+    let pending_dp_requests_upstream = pending_dp_requests.clone();
     let upstream_to_client = async move {
         loop {
             tokio::select! {
@@ -461,8 +464,8 @@ where
                     }
 
                     if just_connected {
-                        let pending = pending_dp_request_upstream.lock().await.take();
-                        if let Some(req) = pending {
+                        let pending: Vec<_> = std::mem::take(&mut *pending_dp_requests_upstream.lock().await);
+                        for req in pending {
                             let response = match req {
                                 PendingDataPackageRequest::Games(games) => {
                                     log::debug!("Sending deferred DataPackage for games: {:?}", games);
@@ -587,7 +590,7 @@ async fn handle_client_messages(
                 false
             }
             MessageDecision::DeferDataPackage(req) => {
-                result.pending_dp_request = Some(req);
+                result.pending_dp_requests.push(req);
                 result.modified = true;
                 false
             }
@@ -631,8 +634,13 @@ fn handle_client_message(
 
     if cmd_type == Some("GetDataPackage") {
         if let Ok(request) = parse_as::<GetDataPackage>(cmd) {
-            let is_logged_in = matches!(state, ConnectionState::LoggedIn);
-            if !is_logged_in {
+            let should_defer = match state {
+                ConnectionState::WaitingForConnected { game, .. } => {
+                    DEFER_DATAPACKAGE_GAMES.contains(&game.as_str())
+                }
+                _ => false,
+            };
+            if should_defer {
                 let pending = if !request.games.is_empty() {
                     log::debug!(
                         "Deferring DataPackage for games {:?} until after Connected",
