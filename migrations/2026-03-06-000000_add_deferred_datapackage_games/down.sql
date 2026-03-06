@@ -1,0 +1,1 @@
+DROP TABLE deferred_datapackage_games;

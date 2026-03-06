@@ -26,9 +26,6 @@ use crate::registry::{ClientEntry, ClientRegistry, ClientResponse};
 const MAX_MESSAGE_SIZE: usize = 15 * 1024 * 1024; // 15 MB
 const MAX_SAY_LENGTH: usize = 2000;
 
-// Games whose clients need DataPackage responses deferred until after Connected
-const DEFER_DATAPACKAGE_GAMES: &[&str] = &["A Hat in Time", "Hollow Knight", "Outer Wilds"];
-
 #[derive(Clone, Debug)]
 pub enum ConnectionState {
     WaitingForRoomInfo,
@@ -94,6 +91,7 @@ pub async fn handle_client<S>(
     passwords: Arc<RwLock<HashMap<SlotId, String>>>,
     deathlink_exclusions: Arc<RwLock<HashSet<SlotId>>>,
     deathlink_probability: Arc<DeathlinkProbability>,
+    deferred_datapackage_games: Arc<RwLock<HashSet<String>>>,
     datapackage_cache: Arc<DataPackageCache>,
     room_id: String,
     inject_notext: bool,
@@ -127,6 +125,7 @@ where
     let signal_sender_client = signal_sender.clone();
     let deathlink_exclusions_client = deathlink_exclusions.clone();
     let deathlink_probability_client = deathlink_probability.clone();
+    let deferred_datapackage_games_client = deferred_datapackage_games.clone();
     let datapackage_cache_client = datapackage_cache.clone();
     let room_id_client = room_id.clone();
     let client_registry_client = client_registry.clone();
@@ -178,12 +177,14 @@ where
                 let mut state = state_client.lock().await;
                 let slot_info = slot_info_client.lock().await;
                 let exclusions = deathlink_exclusions_client.read().await;
+                let deferred_dp_games = deferred_datapackage_games_client.read().await;
                 match handle_client_messages(
                     &mut state,
                     &mut commands,
                     &slot_info,
                     &signal_sender_client,
                     &exclusions,
+                    &deferred_dp_games,
                     &datapackage_cache_client,
                     inject_notext,
                 )
@@ -542,6 +543,7 @@ async fn handle_client_messages(
     slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<SlotId>,
+    deferred_datapackage_games: &HashSet<String>,
     datapackage_cache: &Arc<DataPackageCache>,
     inject_notext: bool,
 ) -> Result<ClientHandlerResult> {
@@ -559,6 +561,7 @@ async fn handle_client_messages(
             slot_info,
             signal_sender,
             deathlink_exclusions,
+            deferred_datapackage_games,
             datapackage_cache,
             inject_notext,
         ) {
@@ -627,6 +630,7 @@ fn handle_client_message(
     slot_info: &Option<(SlotId, String)>,
     signal_sender: &Sender<Signal>,
     deathlink_exclusions: &HashSet<SlotId>,
+    deferred_datapackage_games: &HashSet<String>,
     datapackage_cache: &Arc<DataPackageCache>,
     inject_notext: bool,
 ) -> Result<MessageDecision> {
@@ -636,7 +640,7 @@ fn handle_client_message(
         if let Ok(request) = parse_as::<GetDataPackage>(cmd) {
             let should_defer = match state {
                 ConnectionState::WaitingForConnected { game, .. } => {
-                    DEFER_DATAPACKAGE_GAMES.contains(&game.as_str())
+                    deferred_datapackage_games.contains(game.as_str())
                 }
                 _ => false,
             };

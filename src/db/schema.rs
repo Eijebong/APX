@@ -32,3 +32,10 @@ diesel::table! {
         probability -> Float8,
     }
 }
+
+diesel::table! {
+    deferred_datapackage_games (id) {
+        id -> Int4,
+        game_name -> Varchar,
+    }
+}

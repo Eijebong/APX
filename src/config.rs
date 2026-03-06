@@ -40,6 +40,7 @@ pub struct AppState {
     pub passwords: Arc<RwLock<HashMap<SlotId, String>>>,
     pub deathlink_exclusions: Arc<RwLock<HashSet<SlotId>>>,
     pub deathlink_probability: Arc<DeathlinkProbability>,
+    pub deferred_datapackage_games: Arc<RwLock<HashSet<String>>>,
     pub db_pool: crate::db::DieselPool,
 }
 

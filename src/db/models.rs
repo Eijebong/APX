@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use aprs_proto::primitives::SlotId;
 use chrono::NaiveDateTime;
 use diesel::prelude::*;
@@ -229,6 +231,70 @@ pub async fn get_deathlink_settings(
         .optional()?;
 
     Ok(settings)
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Serialize, Deserialize)]
+#[diesel(table_name = super::schema::deferred_datapackage_games)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct DeferredDatapackageGame {
+    pub id: i32,
+    pub game_name: String,
+}
+
+#[derive(Debug, Clone, Insertable)]
+#[diesel(table_name = super::schema::deferred_datapackage_games)]
+pub struct NewDeferredDatapackageGame {
+    pub game_name: String,
+}
+
+pub async fn get_deferred_datapackage_games(
+    pool: &crate::db::DieselPool,
+) -> anyhow::Result<HashSet<String>> {
+    use super::schema::deferred_datapackage_games::dsl;
+
+    let mut conn = pool.get().await?;
+
+    let games: Vec<DeferredDatapackageGame> =
+        dsl::deferred_datapackage_games.load(&mut conn).await?;
+
+    Ok(games.into_iter().map(|g| g.game_name).collect())
+}
+
+pub async fn add_deferred_datapackage_game(
+    pool: &crate::db::DieselPool,
+    game_name: &str,
+) -> anyhow::Result<bool> {
+    use super::schema::deferred_datapackage_games::dsl;
+
+    let mut conn = pool.get().await?;
+
+    let new_game = NewDeferredDatapackageGame {
+        game_name: game_name.to_string(),
+    };
+
+    let result = diesel::insert_into(dsl::deferred_datapackage_games)
+        .values(&new_game)
+        .on_conflict_do_nothing()
+        .execute(&mut conn)
+        .await?;
+
+    Ok(result > 0)
+}
+
+pub async fn remove_deferred_datapackage_game(
+    pool: &crate::db::DieselPool,
+    game_name: &str,
+) -> anyhow::Result<bool> {
+    use super::schema::deferred_datapackage_games::dsl;
+
+    let mut conn = pool.get().await?;
+
+    let result =
+        diesel::delete(dsl::deferred_datapackage_games.filter(dsl::game_name.eq(game_name)))
+            .execute(&mut conn)
+            .await?;
+
+    Ok(result > 0)
 }
 
 pub async fn set_deathlink_probability(

@@ -186,6 +186,83 @@ async fn set_deathlink_probability(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct DeferredGamesResponse {
+    games: Vec<String>,
+}
+
+#[rocket::get("/deferred_datapackage_games")]
+async fn get_deferred_datapackage_games(
+    _key: ApiKey,
+    state: &State<AppState>,
+) -> Json<DeferredGamesResponse> {
+    let games = state.deferred_datapackage_games.read().await;
+    let mut games: Vec<String> = games.iter().cloned().collect();
+    games.sort_unstable();
+    Json(DeferredGamesResponse { games })
+}
+
+#[rocket::post("/deferred_datapackage_games", data = "<request>")]
+async fn add_deferred_datapackage_game(
+    _key: ApiKey,
+    state: &State<AppState>,
+    request: Json<AddDeferredGameRequest>,
+) -> rocket::http::Status {
+    let game_name = &request.game_name;
+    match crate::db::models::add_deferred_datapackage_game(&state.db_pool, game_name).await {
+        Ok(newly_added) => {
+            let mut games = state.deferred_datapackage_games.write().await;
+            games.insert(game_name.clone());
+
+            if newly_added {
+                log::info!("Added '{}' to deferred datapackage games", game_name);
+                rocket::http::Status::Created
+            } else {
+                log::debug!("'{}' was already in deferred datapackage games", game_name);
+                rocket::http::Status::Ok
+            }
+        }
+        Err(e) => {
+            log::error!("Failed to persist deferred datapackage game: {:?}", e);
+            rocket::http::Status::InternalServerError
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AddDeferredGameRequest {
+    game_name: String,
+}
+
+#[rocket::delete("/deferred_datapackage_games/<game_name>")]
+async fn remove_deferred_datapackage_game(
+    _key: ApiKey,
+    state: &State<AppState>,
+    game_name: &str,
+) -> rocket::http::Status {
+    match crate::db::models::remove_deferred_datapackage_game(&state.db_pool, game_name).await {
+        Ok(was_present) => {
+            let mut games = state.deferred_datapackage_games.write().await;
+            games.remove(game_name);
+
+            if was_present {
+                log::info!("Removed '{}' from deferred datapackage games", game_name);
+                rocket::http::Status::Ok
+            } else {
+                log::debug!("'{}' was not in deferred datapackage games", game_name);
+                rocket::http::Status::NotFound
+            }
+        }
+        Err(e) => {
+            log::error!(
+                "Failed to remove deferred datapackage game from database: {:?}",
+                e
+            );
+            rocket::http::Status::InternalServerError
+        }
+    }
+}
+
 pub fn routes() -> Vec<rocket::Route> {
     rocket::routes![
         refresh_passwords,
@@ -195,6 +272,9 @@ pub fn routes() -> Vec<rocket::Route> {
         get_room_deathlinks,
         get_deathlink_probability,
         set_deathlink_probability,
+        get_deferred_datapackage_games,
+        add_deferred_datapackage_game,
+        remove_deferred_datapackage_game,
     ]
 }
 

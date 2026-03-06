@@ -157,6 +157,10 @@ async fn main() -> Result<()> {
             }
         };
 
+    let deferred_datapackage_games = Arc::new(RwLock::new(
+        db::models::get_deferred_datapackage_games(&db_pool).await?,
+    ));
+
     let upstream_url = format!("ws://{}", config.ap_server);
 
     let datapackage_cache = fetch_datapackage(&upstream_url).await?;
@@ -173,6 +177,7 @@ async fn main() -> Result<()> {
         passwords: passwords.clone(),
         deathlink_exclusions: deathlink_exclusions.clone(),
         deathlink_probability: deathlink_probability.clone(),
+        deferred_datapackage_games: deferred_datapackage_games.clone(),
         db_pool: db_pool.clone(),
     };
 
@@ -262,6 +267,7 @@ async fn main() -> Result<()> {
         let passwords = passwords.clone();
         let deathlink_exclusions = deathlink_exclusions.clone();
         let deathlink_probability = deathlink_probability.clone();
+        let deferred_datapackage_games = deferred_datapackage_games.clone();
         let datapackage_cache = datapackage_cache.clone();
         let upstream_url = upstream_url.clone();
         let tls_acceptor = tls_acceptor.clone();
@@ -297,6 +303,7 @@ async fn main() -> Result<()> {
                                 passwords,
                                 deathlink_exclusions,
                                 deathlink_probability,
+                                deferred_datapackage_games,
                                 datapackage_cache,
                                 room_id,
                                 inject_notext,
@@ -323,6 +330,7 @@ async fn main() -> Result<()> {
                     passwords,
                     deathlink_exclusions,
                     deathlink_probability,
+                    deferred_datapackage_games,
                     datapackage_cache,
                     room_id,
                     inject_notext,
