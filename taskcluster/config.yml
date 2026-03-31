@@ -3,10 +3,10 @@ trust-domain: "ap"
 task-priority: low
 
 taskgraph:
-  cached-task-prefix: "ap.v2.apx"
+  cached-task-prefix: "ap.apx"
   repositories:
     apx:
-      name: "APX"
+      name: "apx"
 
   register: eije_taskgraph:register
 
